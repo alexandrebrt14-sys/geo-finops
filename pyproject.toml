@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "geo-finops"
+version = "1.0.0"
+description = "Tracking centralizado de uso de LLMs em todos os projetos Brasil GEO"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.27",
+]
+
+[tool.setuptools.packages.find]
+include = ["geo_finops*"]

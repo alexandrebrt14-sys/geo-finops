@@ -109,7 +109,19 @@ def mark_error(ids: list[int]) -> None:
 
 
 def _row_to_payload(row: dict) -> dict:
-    payload = {
+    """Converte uma linha do SQLite local para payload do Supabase.
+
+    PostgREST exige TODAS as linhas do batch com as MESMAS chaves — por isso
+    sempre incluimos metadata (mesmo None) no payload.
+    """
+    metadata = None
+    raw_meta = row.get("metadata")
+    if raw_meta:
+        try:
+            metadata = json.loads(raw_meta)
+        except (json.JSONDecodeError, TypeError):
+            metadata = None
+    return {
         "timestamp": row["timestamp"],
         "project": row["project"],
         "run_id": row["run_id"],
@@ -120,35 +132,34 @@ def _row_to_payload(row: dict) -> dict:
         "tokens_out": row["tokens_out"],
         "cost_usd": row["cost_usd"],
         "success": bool(row["success"]),
+        "metadata": metadata,
         "local_id": row["id"],
     }
-    if row.get("metadata"):
-        try:
-            payload["metadata"] = json.loads(row["metadata"])
-        except (json.JSONDecodeError, TypeError):
-            payload["metadata"] = None
-    return payload
 
 
 def push_batch(rows: list[dict], url: str, key: str) -> tuple[int, int]:
-    """POST batch para Supabase REST API. Retorna (success_count, error_count)."""
+    """POST batch para Supabase REST API. Retorna (success_count, error_count).
+
+    Usa Prefer: resolution=ignore-duplicates que funciona com qualquer constraint
+    UNIQUE existente (incluindo expressional). Linhas ja sincronizadas sao
+    silenciosamente ignoradas pelo Postgres via ON CONFLICT DO NOTHING.
+    """
     if not rows:
         return 0, 0
     headers = {
         "apikey": key,
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
-        # on_conflict garante upsert idempotente
-        "Prefer": "resolution=merge-duplicates,return=minimal",
+        "Prefer": "resolution=ignore-duplicates,return=minimal",
     }
     payload = [_row_to_payload(r) for r in rows]
-    endpoint = f"{url.rstrip('/')}/rest/v1/finops_calls?on_conflict=timestamp,project,run_id,model_id"
+    endpoint = f"{url.rstrip('/')}/rest/v1/finops_calls"
     try:
-        with httpx.Client(timeout=30) as c:
+        with httpx.Client(timeout=60) as c:
             r = c.post(endpoint, headers=headers, json=payload)
         if r.status_code in (200, 201, 204):
             return len(rows), 0
-        logger.error("Supabase HTTP %d: %s", r.status_code, r.text[:300])
+        logger.error("Supabase HTTP %d: %s", r.status_code, r.text[:400])
         return 0, len(rows)
     except httpx.RequestError as exc:
         logger.error("Supabase erro de rede: %s", exc)

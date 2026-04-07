@@ -165,6 +165,11 @@ def push_batch(rows: list[dict], url: str, key: str, max_retries: int = 3) -> tu
                 r = c.post(endpoint, headers=headers, json=payload)
             if r.status_code in (200, 201, 204):
                 return len(rows), 0
+            # 409 Conflict = todas as rows do batch ja existem (dedup do Postgres).
+            # Eh um sucesso silencioso: idempotencia funcionando, marcar como synced.
+            if r.status_code == 409 and "23505" in r.text:
+                logger.debug("Supabase 409 (todas duplicatas, dedup OK): %d rows", len(rows))
+                return len(rows), 0
             # 4xx fatais (auth/permissoes/validacao) — nao adianta retry
             if r.status_code in (401, 403, 422):
                 logger.error("Supabase HTTP %d (fatal): %s", r.status_code, r.text[:300])

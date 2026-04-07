@@ -267,6 +267,40 @@ def check_orphan_callers_instrumented() -> Check:
     return c.ok(f"{len(files_to_check)}/{len(files_to_check)} instrumentados")
 
 
+def check_resync_idempotency() -> Check:
+    """Re-sincroniza uma row ja sincronizada e valida que sync.py NAO marca como erro."""
+    c = Check("Re-sync idempotente (409 Conflict tratado como sucesso)")
+    try:
+        from geo_finops.db import get_connection
+        from geo_finops.sync import sync as run_sync, _load_supabase_creds
+
+        # Pega 1 row ja sincronizada e marca como pending pra forcar re-envio
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT id FROM llm_calls WHERE sync_status='synced' LIMIT 1"
+        ).fetchone()
+        if not row:
+            return c.fail("sem linhas synced para testar")
+        rid = row["id"]
+        conn.execute(
+            "UPDATE llm_calls SET sync_status='pending' WHERE id=?", (rid,)
+        )
+        conn.close()
+
+        url, key = _load_supabase_creds()
+        if not url or not key:
+            return c.fail("supabase creds ausentes")
+
+        result = run_sync(batch_size=10, dry_run=False)
+        if result.get("errors", 0) > 0:
+            return c.fail(f"sync re-tentou e marcou como erro: {result}")
+        if result.get("synced", 0) == 0:
+            return c.fail(f"nada foi processado: {result}")
+        return c.ok(f"row id={rid} re-syncada com sucesso (409 OK)")
+    except Exception as exc:
+        return c.fail(str(exc))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--site", default="https://alexandrecaramaschi.com")
@@ -285,6 +319,7 @@ def main():
         check_task_scheduler(),
         check_adapters(),
         check_orphan_callers_instrumented(),
+        check_resync_idempotency(),
     ]
 
     print()

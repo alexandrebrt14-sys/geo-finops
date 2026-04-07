@@ -62,6 +62,26 @@ def run_id_for_session(project: str | None = None) -> str:
 # Track call (API principal)
 # ---------------------------------------------------------------------------
 
+def _normalize_timestamp(ts: str | None) -> str:
+    """Normaliza timestamp para ISO 8601 UTC com microsegundos.
+
+    Garante que track_call de diferentes paths (Python local, server-side
+    Next.js, etc.) sempre gere o mesmo formato — evita falha do dedup
+    quando o mesmo logico-call eh registrado por dois caminhos.
+    """
+    if ts is None:
+        return datetime.now(timezone.utc).isoformat()
+    try:
+        # Aceita timestamps com ou sem microseg, com Z ou +00:00
+        clean = ts.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(clean)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+    except ValueError:
+        return datetime.now(timezone.utc).isoformat()
+
+
 def track_call(
     project: str,
     model_id: str,
@@ -95,8 +115,7 @@ def track_call(
     """
     init_db()  # idempotente
 
-    if timestamp is None:
-        timestamp = datetime.now(timezone.utc).isoformat()
+    timestamp = _normalize_timestamp(timestamp)
     if provider is None:
         provider = _infer_provider(model_id)
 

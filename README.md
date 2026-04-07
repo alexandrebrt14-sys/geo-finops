@@ -2,13 +2,25 @@
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)
 ![Status](https://img.shields.io/badge/status-production-green.svg)
+![Health Check](https://img.shields.io/badge/health-13%2F13-success.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
 
 **Tracking centralizado de uso de LLMs para todos os projetos do ecossistema Brasil GEO.**
 
 Substitui 4 sistemas de tracking paralelos por um único SQLite local com sincronização diária para Supabase. Resolveu o problema de **505 calls órfãs** detectadas via OpenAI admin API que não estavam sendo rastreadas por nenhum dos sistemas anteriores.
 
-**Estado atual**: 1.467 calls / $255,43 / 5 providers / 10 modelos / 3 projetos rastreados.
+**Estado atual** (validado por health check 13/13 em 2026-04-07):
+- 1.469 calls / $255,43 / 5 providers / 5 projetos
+- Pipeline ponta-a-ponta operacional (SQLite local → Supabase → snapshot → endpoint live)
+- 4 callers órfãos instrumentados
+- Task Scheduler diário 23:50 ativo
+- Re-sync idempotente validado (HTTP 409 tratado como sucesso)
+- Live em https://alexandrecaramaschi.com/finops
+
+> **Documentação adicional:**
+> - [`CHANGELOG.md`](CHANGELOG.md) — histórico de versões
+> - [`docs/LESSONS_LEARNED.md`](docs/LESSONS_LEARNED.md) — 9 bugs reais encontrados e seus fixes
+> - [`scripts/health_check.py`](scripts/health_check.py) — 13 dimensões de validação automatizada
 
 ---
 

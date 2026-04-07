@@ -137,13 +137,16 @@ def _row_to_payload(row: dict) -> dict:
     }
 
 
-def push_batch(rows: list[dict], url: str, key: str) -> tuple[int, int]:
-    """POST batch para Supabase REST API. Retorna (success_count, error_count).
+def push_batch(rows: list[dict], url: str, key: str, max_retries: int = 3) -> tuple[int, int]:
+    """POST batch para Supabase REST API com retry exponencial. Retorna (success_count, error_count).
 
     Usa Prefer: resolution=ignore-duplicates que funciona com qualquer constraint
     UNIQUE existente (incluindo expressional). Linhas ja sincronizadas sao
     silenciosamente ignoradas pelo Postgres via ON CONFLICT DO NOTHING.
+
+    Retry com backoff exponencial em 4xx (exceto 401/403/422) e 5xx + erros de rede.
     """
+    import time
     if not rows:
         return 0, 0
     headers = {
@@ -154,16 +157,31 @@ def push_batch(rows: list[dict], url: str, key: str) -> tuple[int, int]:
     }
     payload = [_row_to_payload(r) for r in rows]
     endpoint = f"{url.rstrip('/')}/rest/v1/finops_calls"
-    try:
-        with httpx.Client(timeout=60) as c:
-            r = c.post(endpoint, headers=headers, json=payload)
-        if r.status_code in (200, 201, 204):
-            return len(rows), 0
-        logger.error("Supabase HTTP %d: %s", r.status_code, r.text[:400])
-        return 0, len(rows)
-    except httpx.RequestError as exc:
-        logger.error("Supabase erro de rede: %s", exc)
-        return 0, len(rows)
+
+    last_error = ""
+    for attempt in range(max_retries + 1):
+        try:
+            with httpx.Client(timeout=60) as c:
+                r = c.post(endpoint, headers=headers, json=payload)
+            if r.status_code in (200, 201, 204):
+                return len(rows), 0
+            # 4xx fatais (auth/permissoes/validacao) — nao adianta retry
+            if r.status_code in (401, 403, 422):
+                logger.error("Supabase HTTP %d (fatal): %s", r.status_code, r.text[:300])
+                return 0, len(rows)
+            # 5xx ou 4xx transitorio — retry com backoff
+            last_error = f"HTTP {r.status_code}: {r.text[:200]}"
+            logger.warning("Supabase %s, retry %d/%d", last_error, attempt + 1, max_retries)
+        except httpx.RequestError as exc:
+            last_error = f"RequestError: {exc}"
+            logger.warning("Supabase rede, retry %d/%d: %s", attempt + 1, max_retries, exc)
+
+        if attempt < max_retries:
+            backoff = (2 ** attempt) + (attempt * 0.5)
+            time.sleep(backoff)
+
+    logger.error("Supabase batch falhou apos %d retries: %s", max_retries, last_error)
+    return 0, len(rows)
 
 
 def sync(batch_size: int = 500, dry_run: bool = False) -> dict:

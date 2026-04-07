@@ -261,12 +261,83 @@ geo-finops/
 
 ---
 
-## Próximos passos
+## Status (todas as integracoes ativas)
 
-1. **Criar tabela `finops_calls` no Supabase** (DDL acima) — habilita o sync worker
-2. **Instalar Task Scheduler** (`install_scheduler.ps1`) — sync automático 23:50 diário
-3. **Instrumentar caramaschi** com `record()` do adapter (ainda não tem tracker estruturado)
-4. **Instrumentar callers órfãos do gpt-4o-mini** — `landing-page-geo/lib/geo-checker/llm-probes.ts`, `scripts/python/llm_utils.py`, `caramaschi/whatsapp_nlp_handler.py` — esses 505 calls que descobrimos via OpenAI admin key vão começar a aparecer no `calls.db`
+Pipeline ponta-a-ponta operacional desde 2026-04-07. Validar a qualquer momento:
+
+```bash
+python scripts/health_check.py
+```
+
+12/12 checks passando:
+1. Pacote geo_finops importavel
+2. SQLite local existe e tem dados (1.468+ calls)
+3. Schema completo (14 colunas)
+4. Constraint UNIQUE funcional (dedup ativa)
+5. 3 migracoes historicas registradas
+6. Supabase finops_calls com 1.468 linhas
+7. Sync status: pending=0, error=0
+8. Snapshot estatico fresco (<24h)
+9. Endpoint live em alexandrecaramaschi.com/api/finops/llm-usage
+10. Task Scheduler GeoFinOpsSync registrado
+11. 4 adapters thin presentes
+12. 4 callers orfaos instrumentados
+
+## Robustez
+
+- **Retry exponencial no sync**: até 3 tentativas com backoff 1s/2.5s/5s para 5xx/erros de rede. 4xx fatais (401/403/422) não fazem retry.
+- **Idempotência**: UNIQUE local + ON CONFLICT DO NOTHING no Supabase impede duplicação mesmo se sync rodar 2x simultâneo.
+- **Fire-and-forget no client**: tracking nunca pode quebrar a chamada principal — todas as integrações silenciam erros.
+- **Fallback cascade**: snapshot estático no repo > endpoint API > fallback no FinOpsDashboard. Mesmo com Supabase fora do ar, o site nunca quebra.
+
+## Runbook de troubleshooting
+
+### Sync nao envia para Supabase
+
+1. `python scripts/health_check.py` para diagnostico geral
+2. Se "Supabase finops_calls" falhar: `python scripts/bootstrap_supabase.py` para validar conectividade
+3. Se "Sync status" mostrar `error > 0`: `python -c "from geo_finops.db import get_connection; conn=get_connection(); n=conn.execute(\"UPDATE llm_calls SET sync_status='pending' WHERE sync_status='error'\").rowcount; print(n)"` reset
+4. Rodar manualmente: `python -m geo_finops.sync`
+
+### Task Scheduler nao roda
+
+```powershell
+# Verificar
+schtasks /Query /TN GeoFinOpsSync /V /FO LIST
+
+# Reinstalar
+schtasks /Delete /TN GeoFinOpsSync /F
+powershell -NoProfile -Command "schtasks /Create /TN 'GeoFinOpsSync' /TR 'python -m geo_finops.sync' /SC DAILY /ST 23:50 /F"
+
+# Testar agora
+schtasks /Run /TN GeoFinOpsSync
+```
+
+### Endpoint live retorna dados velhos
+
+Snapshot eh estatico no repo. Atualizar:
+```bash
+cd C:/Sandyboxclaude/geo-finops
+python scripts/export_snapshot.py
+cd ../landing-page-geo
+git add public/finops-snapshot.json
+git commit -m "chore(finops): refresh snapshot [skip build]"  # nao dispara build Vercel
+git push
+```
+
+Para evitar build Vercel desnecessario, o filtro `should-build.sh` ignora commits com `[skip build]` no titulo.
+
+### Instrumentar novo projeto
+
+1. Importar via `sys.path.insert`:
+```python
+import sys
+sys.path.insert(0, "C:/Sandyboxclaude/geo-finops")
+from geo_finops import track_call
+```
+2. Criar adapter thin em `<projeto>/src/unified_finops.py` (ver os 4 existentes)
+3. Chamar `record(...)` apos cada call LLM
+4. Rodar `python scripts/health_check.py` para validar
 
 ---
 

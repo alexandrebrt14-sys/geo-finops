@@ -1,0 +1,121 @@
+# prices.yaml — tabela canonica de precos LLM (B-020)
+#
+# Achado B-020 da auditoria de ecossistema 2026-04-08 (Onda 3 filtrada).
+# Antes deste arquivo, 4 consumers calculavam custo independentemente:
+# geo-orchestrator/src/llm_client.py, papers/src/finops/tracker.py,
+# curso-factory/src/llm_client.py, caramaschi/caramaschi_finops.py.
+# Risco de divergencia silenciosa (ja observada: perplexity estava
+# subestimada em 3x antes de Sprint 5 do orchestrator).
+#
+# Esta tabela eh fonte unica de verdade. Uso programatico:
+#
+#   from geo_finops.prices import get_price, calculate_cost
+#   price_in, price_out = get_price("anthropic", "claude-opus-4-6")
+#   cost = calculate_cost("anthropic", "claude-opus-4-6", tok_in=1000, tok_out=500)
+#
+# Versionamento: campo `version` no topo. Mudancas devem ser commitadas
+# com referencia a fonte oficial dos precos (URL Anthropic/OpenAI/etc).
+#
+# Precos em USD por 1K tokens (input, output).
+
+version: "2026-04-09"
+last_verified: "2026-04-09"
+
+providers:
+
+  # ─── Anthropic Claude family ─────────────────────────────────────────────
+  # https://www.anthropic.com/pricing#api
+  anthropic:
+    models:
+      claude-opus-4-6:
+        input_per_1k: 0.015
+        output_per_1k: 0.075
+        tier: high
+        notes: "Tier mais alto da familia Claude. Ideal para arquitetura, codigo, revisao."
+
+      claude-sonnet-4-6:
+        input_per_1k: 0.003
+        output_per_1k: 0.015
+        tier: medium
+        notes: "Sonnet 4.6 — 5x mais barato que Opus, ainda excelente."
+
+      claude-haiku-4-5:
+        input_per_1k: 0.0008
+        output_per_1k: 0.004
+        tier: low
+        notes: "Haiku 4.5 — 19x mais barato que Opus. Para tarefas simples."
+
+  # ─── OpenAI ───────────────────────────────────────────────────────────────
+  # https://openai.com/api/pricing/
+  openai:
+    models:
+      gpt-4o:
+        input_per_1k: 0.005
+        output_per_1k: 0.015
+        tier: high
+        notes: "GPT-4o — redacao, copywriting, SEO, traducao."
+
+      gpt-4o-mini:
+        input_per_1k: 0.00015
+        output_per_1k: 0.0006
+        tier: low
+        notes: "GPT-4o-mini — 33x mais barato. Para draft + classificacao."
+
+  # ─── Google Gemini ────────────────────────────────────────────────────────
+  # https://ai.google.dev/pricing
+  google:
+    models:
+      gemini-2.5-pro:
+        input_per_1k: 0.00125
+        output_per_1k: 0.005
+        tier: medium
+        notes: "Gemini 2.5 Pro — analise, classificacao, sumarizacao multi-arquivo."
+
+      gemini-2.5-flash:
+        input_per_1k: 0.000075
+        output_per_1k: 0.0003
+        tier: low
+        notes: "Gemini 2.5 Flash — 16x mais barato. Para tarefas em lote."
+
+  # ─── Perplexity ──────────────────────────────────────────────────────────
+  # https://docs.perplexity.ai/guides/pricing
+  perplexity:
+    models:
+      sonar-pro:
+        input_per_1k: 0.003
+        output_per_1k: 0.015
+        tier: medium
+        notes: "Sonar Pro — pesquisa ao vivo com fontes verificaveis."
+        # Bug historico: tinha 0.001 em geo-orchestrator/llm_client.py
+        # antes da Sprint 5 (subestimacao 3x). Fix em 2026-04-08.
+
+      sonar:
+        input_per_1k: 0.001
+        output_per_1k: 0.001
+        tier: low
+        notes: "Sonar basico — pesquisa rapida."
+
+  # ─── Groq ────────────────────────────────────────────────────────────────
+  # https://groq.com/pricing/
+  groq:
+    models:
+      llama-3.3-70b-versatile:
+        input_per_1k: 0.00059
+        output_per_1k: 0.00079
+        tier: low
+        notes: "Llama 3.3 70B via Groq — inferencia ultra-rapida (~10x)."
+
+      llama-3.1-8b-instant:
+        input_per_1k: 0.00005
+        output_per_1k: 0.00008
+        tier: low
+        notes: "Llama 3.1 8B — extremamente barato para classificacao."
+
+# ─── Defaults para modelos desconhecidos ───────────────────────────────────
+# Quando o caller passa um model_id que nao esta na tabela acima, o
+# get_price retorna estes valores padrao. Permite tracking sem crashar
+# em modelos novos antes da tabela ser atualizada.
+fallback:
+  input_per_1k: 0.001
+  output_per_1k: 0.003
+  notes: "Fallback para modelos desconhecidos — atualize prices.yaml ASAP."

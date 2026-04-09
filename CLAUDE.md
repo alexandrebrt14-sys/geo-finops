@@ -1,5 +1,34 @@
 # geo-finops — Instruções Claude Code
 
+## 2026-04-09 — Wave F (Onda 3 versão solo)
+
+### B-020: `prices.yaml` fonte única de preços LLM
+- **Commit:** `d19c61e` — `feat(finops): prices.yaml fonte unica + dashboard agregado solo`
+- **Arquivos:** `geo_finops/prices.yaml` + `geo_finops/prices.py`
+- **API:** `get_price(provider, model)`, `calculate_cost(provider, model, tin, tout)`, `list_providers()`, `list_models()`, `get_model_info()`
+- **5 providers, 11 modelos** (Anthropic Opus/Sonnet/Haiku, OpenAI GPT-4o/mini, Google Gemini Pro/Flash, Perplexity Sonar Pro/básico, Groq Llama 3.3/3.1)
+- **Versionado** por campo `version` no YAML
+- **Sentinela contra regressão histórica:** Perplexity sonar-pro NUNCA pode voltar a $0.001 (incidente Sprint 5)
+- **21 testes**
+
+### B-022: Dashboard agregado HTML solo
+- **Commit:** `d19c61e` (junto com B-020)
+- **Arquivo:** `scripts/aggregate_dashboard.py`
+- Consolida 3 fontes: `calls.db` local + `geo-orchestrator/.kpi_history.jsonl` + `caramaschi.fly.dev/finops`
+- HTML estático Chart.js inline em `~/.cache/geo-dashboard.html`
+- **CLI:** `python scripts/aggregate_dashboard.py [--since 30] [--output PATH]`
+- **12 testes**
+
+### B-014: Alembic baseline (Wave E)
+- **Commit:** `48146bb` — `feat(db): setup Alembic com baseline`
+- **Setup minimal sem ORM SQLAlchemy** — usa `op.execute(SQL raw)` para preservar padrão existente
+- **Workflow:** `alembic revision -m "msg"` → editar SQL → `alembic upgrade head`
+- **Para DB existente:** `alembic stamp 0001_baseline` (sem reaplicar SQL)
+- **10 testes**
+
+### B-025: security-scan workflow
+- bandit + pip-audit + gitleaks semanalmente
+
 ## Propósito
 
 Tracking centralizado de uso de LLMs em todos os projetos do ecossistema Brasil GEO. SQLite local em `~/.config/geo-finops/calls.db` + sync diário Supabase. Substituiu 4 trackers paralelos. 1467 calls migradas historicamente.

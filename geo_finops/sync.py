@@ -43,27 +43,108 @@ from .db import get_connection, init_db
 logger = logging.getLogger(__name__)
 
 
+def _candidate_env_files() -> list:
+    """Lista ordenada de candidatos a arquivo .env para carregar credenciais.
+
+    Ordem (primeira fonte com ambos url+key vence):
+    1. GEO_FINOPS_ENV_FILE (override explicito por env var)
+    2. $XDG_CONFIG_HOME/geo-finops/.env
+    3. ~/.config/geo-finops/.env (XDG default Linux/Mac)
+    4. ~/.geo-finops.env (home dotfile)
+    5. <parent_dir>/geo-orchestrator/.env (sibling repo se layout canonico)
+
+    Esta lista eh portavel: nenhum path absoluto Windows hardcoded. Funciona
+    em Linux, macOS e Windows desde que pelo menos uma fonte exista.
+    """
+    from pathlib import Path
+
+    candidates: list = []
+
+    explicit = os.environ.get("GEO_FINOPS_ENV_FILE")
+    if explicit:
+        candidates.append(Path(explicit))
+
+    xdg_config = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_config:
+        candidates.append(Path(xdg_config) / "geo-finops" / ".env")
+
+    candidates.append(Path.home() / ".config" / "geo-finops" / ".env")
+    candidates.append(Path.home() / ".geo-finops.env")
+    candidates.append(Path(__file__).resolve().parents[2] / "geo-orchestrator" / ".env")
+
+    return candidates
+
+
+def _parse_env_file(path) -> dict:
+    """Le um arquivo .env e retorna dict de variaveis.
+
+    Ignora comentarios (#) e linhas malformadas. Strippa aspas simples e
+    duplas dos valores. Trata erros de IO/encoding silenciosamente
+    (loga warning e retorna o que conseguiu parsear).
+    """
+    result: dict = {}
+    try:
+        if not path.exists():
+            return result
+    except OSError:
+        return result
+
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning("nao foi possivel ler %s: %s", path, exc)
+        return result
+
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        result[key.strip()] = value.strip().strip('"').strip("'")
+    return result
+
+
 def _load_supabase_creds() -> tuple[str | None, str | None]:
-    """Le SUPABASE_URL e SUPABASE_KEY do .env do orchestrator (fonte canonica)."""
-    # Tenta env primeiro
+    """Le SUPABASE_URL e SUPABASE_KEY com busca dinamica em multiplas fontes.
+
+    Ordem de prioridade (primeira fonte que tem ambos vence):
+    1. Env vars: SUPABASE_URL + (SUPABASE_KEY ou SUPABASE_SERVICE_ROLE_KEY)
+    2. Override: GEO_FINOPS_ENV_FILE -> .env
+    3. XDG basedir: $XDG_CONFIG_HOME/geo-finops/.env
+    4. XDG default: ~/.config/geo-finops/.env
+    5. Home dotfile: ~/.geo-finops.env
+    6. Sibling: <parent>/geo-orchestrator/.env
+
+    Refatorado em 2026-04-09 (achado F11 da auditoria 2026-04-08) para
+    eliminar path Windows hardcoded e funcionar em qualquer host.
+
+    Returns:
+        Tupla (url, key). Cada valor pode ser None se nao encontrado em
+        nenhuma fonte.
+    """
     url = os.environ.get("SUPABASE_URL")
     key = os.environ.get("SUPABASE_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
     if url and key:
+        logger.debug("supabase creds: env vars")
         return url, key
-    # Fallback: le do .env do orchestrator
-    from pathlib import Path
-    candidates = [
-        Path(__file__).resolve().parents[2] / "geo-orchestrator" / ".env",
-        Path("C:/Sandyboxclaude/geo-orchestrator/.env"),
-    ]
-    for env_file in candidates:
-        if env_file.exists():
-            for line in env_file.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line.startswith("SUPABASE_URL="):
-                    url = line.split("=", 1)[1].strip().strip('"').strip("'")
-                elif line.startswith("SUPABASE_KEY="):
-                    key = line.split("=", 1)[1].strip().strip('"').strip("'")
+
+    for env_file in _candidate_env_files():
+        parsed = _parse_env_file(env_file)
+        if not parsed:
+            continue
+        candidate_url = parsed.get("SUPABASE_URL") or url
+        candidate_key = (
+            parsed.get("SUPABASE_KEY")
+            or parsed.get("SUPABASE_SERVICE_ROLE_KEY")
+            or key
+        )
+        if candidate_url and candidate_key:
+            logger.debug("supabase creds: %s", env_file)
+            return candidate_url, candidate_key
+        # Atualiza parciais para o caso de fontes complementares
+        url = candidate_url
+        key = candidate_key
+
     return url, key
 
 

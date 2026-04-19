@@ -12,7 +12,6 @@ Alembic para migracoes de schema do calls.db. Estes testes validam:
 
 from __future__ import annotations
 
-import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -65,6 +64,7 @@ def test_env_py_resolves_via_get_db_path():
 
 def _make_alembic_config(db_path: Path):
     from alembic.config import Config
+
     cfg = Config(str(ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(ROOT / "geo_finops" / "migrations"))
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path.as_posix()}")
@@ -74,6 +74,7 @@ def _make_alembic_config(db_path: Path):
 def test_baseline_creates_llm_calls_table(isolated_db):
     """Rodar upgrade head em DB vazio cria a tabela llm_calls."""
     from alembic.command import upgrade
+
     cfg = _make_alembic_config(isolated_db)
     upgrade(cfg, "head")
 
@@ -87,6 +88,7 @@ def test_baseline_creates_llm_calls_table(isolated_db):
 
 def test_baseline_creates_indexes(isolated_db):
     from alembic.command import upgrade
+
     cfg = _make_alembic_config(isolated_db)
     upgrade(cfg, "head")
 
@@ -112,6 +114,7 @@ def test_baseline_creates_indexes(isolated_db):
 def test_baseline_idempotent(isolated_db):
     """Rodar upgrade duas vezes nao quebra (IF NOT EXISTS)."""
     from alembic.command import upgrade
+
     cfg = _make_alembic_config(isolated_db)
     upgrade(cfg, "head")
     # Tentar upgrade de novo — Alembic detecta que ja esta em head
@@ -130,6 +133,7 @@ def test_init_db_compatible_with_alembic_baseline(tmp_path, monkeypatch):
     o set de colunas e indices das tabelas relevantes.
     """
     from alembic.command import upgrade
+
     from geo_finops.db import init_db
 
     # Banco 1: via init_db
@@ -150,22 +154,24 @@ def test_init_db_compatible_with_alembic_baseline(tmp_path, monkeypatch):
 
     cols1 = _columns(db1)
     cols2 = _columns(db2)
-    assert cols1 == cols2, f"divergencia entre init_db e alembic: {cols1.symmetric_difference(cols2)}"
+    assert cols1 == cols2, (
+        f"divergencia entre init_db e alembic: {cols1.symmetric_difference(cols2)}"
+    )
 
 
 def test_baseline_downgrade_blocked(isolated_db):
     """Downgrade do baseline deve levantar (protecao contra perda de dados)."""
-    from alembic.command import upgrade, downgrade
+    from alembic.command import downgrade, upgrade
+
     cfg = _make_alembic_config(isolated_db)
     upgrade(cfg, "head")
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError, match="Downgrade do baseline"):
         downgrade(cfg, "base")
 
 
 def test_alembic_current_after_upgrade(isolated_db):
     """alembic.command.current retorna 0001_baseline apos upgrade."""
     from alembic.command import upgrade
-    from alembic.script import ScriptDirectory
     from alembic.runtime.migration import MigrationContext
     from sqlalchemy import create_engine
 

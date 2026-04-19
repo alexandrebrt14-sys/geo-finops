@@ -1,6 +1,7 @@
 """API publica de tracking — usada pelos adapters dos 4 projetos.
 
 Uso minimo:
+
     from geo_finops import track_call
     track_call(
         project="geo-orchestrator",
@@ -12,27 +13,45 @@ Uso minimo:
         task_type="architecture",
         success=True,
     )
+
+As funcoes de agregacao foram movidas para ``geo_finops.aggregates`` a
+partir da refatoracao 2026-04-19. ``aggregate_by`` permanece aqui como
+re-export (deprecation-proof) para nao quebrar callers externos.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 import sqlite3
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from typing import Any
 
 from .db import get_connection, init_db
 
 logger = logging.getLogger(__name__)
 
+__all__ = [
+    "aggregate_by",
+    "query_calls",
+    "run_id_for_session",
+    "track_call",
+]
+
+
 # ---------------------------------------------------------------------------
 # Inferencia de provider a partir do model_id
 # ---------------------------------------------------------------------------
 
-def _infer_provider(model_id: str) -> str:
+
+def _infer_provider(model_id: str | None) -> str:
+    """Deriva o provider pelo substring do model_id.
+
+    Mantem match por keywords (e nao por prefixo exato) porque os callers
+    usam ids com sufixos de versao (ex: ``claude-opus-4-6-20250415``).
+    Retorna ``"unknown"`` quando nada bate — jamais levanta.
+    """
     if not model_id:
         return "unknown"
     m = model_id.lower()
@@ -49,30 +68,37 @@ def _infer_provider(model_id: str) -> str:
     return "unknown"
 
 
-# ---------------------------------------------------------------------------
-# run_id helper para sessoes
-# ---------------------------------------------------------------------------
-
 def run_id_for_session(project: str | None = None) -> str:
-    """Gera um run_id timestamp-based agrupando calls de uma mesma sessao."""
+    """Gera um run_id timestamp-based agrupando calls de uma mesma sessao.
+
+    Formato: ``YYYYMMDDTHHMMSS_<6hex>``. O sufixo aleatorio evita colisao
+    de sessoes iniciadas no mesmo segundo (raro, mas possivel em CI).
+    O parametro ``project`` eh aceito por compat — nao afeta o resultado.
+    """
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "_" + uuid.uuid4().hex[:6]
 
 
 # ---------------------------------------------------------------------------
-# Track call (API principal)
+# Normalizacao de timestamps
 # ---------------------------------------------------------------------------
 
-def _normalize_timestamp(ts: str | None) -> str:
-    """Normaliza timestamp para ISO 8601 UTC com microsegundos.
 
-    Garante que track_call de diferentes paths (Python local, server-side
-    Next.js, etc.) sempre gere o mesmo formato — evita falha do dedup
-    quando o mesmo logico-call eh registrado por dois caminhos.
+def _normalize_timestamp(ts: str | None) -> str:
+    """Normaliza timestamp para ISO 8601 UTC.
+
+    Garante que ``track_call`` de diferentes paths (Python local,
+    server-side Next.js, cron) sempre gere o mesmo formato — evita falha
+    do dedup quando o mesmo logico-call eh registrado por dois caminhos.
+
+    Aceita:
+    - ``None`` → now(UTC)
+    - String ISO com ``Z`` ou ``+00:00``
+    - String naive (assume UTC)
+    - Qualquer string ilegivel → now(UTC) com warning silenciado
     """
     if ts is None:
         return datetime.now(timezone.utc).isoformat()
     try:
-        # Aceita timestamps com ou sem microseg, com Z ou +00:00
         clean = ts.replace("Z", "+00:00")
         dt = datetime.fromisoformat(clean)
         if dt.tzinfo is None:
@@ -80,6 +106,11 @@ def _normalize_timestamp(ts: str | None) -> str:
         return dt.astimezone(timezone.utc).isoformat()
     except ValueError:
         return datetime.now(timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Track call (API principal)
+# ---------------------------------------------------------------------------
 
 
 def track_call(
@@ -98,22 +129,23 @@ def track_call(
     """Grava uma chamada LLM no banco centralizado.
 
     Args:
-        project: identificador do projeto (ex: "geo-orchestrator", "papers")
-        model_id: id real do modelo (ex: "claude-opus-4-6", "gpt-4o-mini")
-        tokens_in: tokens de input
-        tokens_out: tokens de output
-        cost_usd: custo em USD
-        run_id: agrupa calls da mesma execucao (opcional)
-        task_type: tipo da tarefa (research, code, etc) (opcional)
-        success: True se a call foi bem sucedida
-        provider: opcional, infere de model_id se nao informado
-        timestamp: ISO 8601 UTC; default = now
-        metadata: dict opcional, serializado como JSON
+        project: Identificador do projeto (ex: ``geo-orchestrator``, ``papers``).
+        model_id: ID real do modelo (ex: ``claude-opus-4-6``, ``gpt-4o-mini``).
+        tokens_in: Tokens de input.
+        tokens_out: Tokens de output.
+        cost_usd: Custo em USD.
+        run_id: Agrupa calls da mesma execucao (opcional).
+        task_type: Tipo da tarefa (``research``, ``code``, etc). Opcional.
+        success: ``True`` se a call foi bem sucedida.
+        provider: Opcional; infere de ``model_id`` se nao informado.
+        timestamp: ISO 8601 UTC. Default = ``now``.
+        metadata: Dict opcional, serializado como JSON.
 
     Returns:
-        ID da linha inserida, ou None em caso de duplicata (dedup) ou erro.
+        ID da linha inserida, ou ``None`` em caso de duplicata (dedup)
+        ou erro de IO. Callers devem tratar ``None`` como no-op.
     """
-    init_db()  # idempotente
+    init_db()
 
     timestamp = _normalize_timestamp(timestamp)
     if provider is None:
@@ -131,15 +163,26 @@ def track_call(
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
             """,
             (
-                timestamp, project, run_id, task_type, model_id, provider,
-                int(tokens_in or 0), int(tokens_out or 0), float(cost_usd or 0),
-                1 if success else 0, metadata_json,
+                timestamp,
+                project,
+                run_id,
+                task_type,
+                model_id,
+                provider,
+                int(tokens_in or 0),
+                int(tokens_out or 0),
+                float(cost_usd or 0),
+                1 if success else 0,
+                metadata_json,
             ),
         )
         if cur.rowcount == 0:
             logger.debug(
                 "geo_finops: dedup hit (project=%s run_id=%s model=%s ts=%s)",
-                project, run_id, model_id, timestamp,
+                project,
+                run_id,
+                model_id,
+                timestamp,
             )
             return None
         return cur.lastrowid
@@ -154,6 +197,7 @@ def track_call(
 # Query helpers
 # ---------------------------------------------------------------------------
 
+
 def query_calls(
     project: str | None = None,
     provider: str | None = None,
@@ -161,7 +205,10 @@ def query_calls(
     end: str | None = None,
     limit: int = 1000,
 ) -> list[dict]:
-    """Query calls com filtros opcionais."""
+    """Query calls com filtros opcionais.
+
+    Ordena por timestamp DESC para facilitar listagens "ultimas N".
+    """
     init_db()
     sql = "SELECT * FROM llm_calls WHERE 1=1"
     params: list = []
@@ -193,30 +240,11 @@ def aggregate_by(
     start: str | None = None,
     end: str | None = None,
 ) -> list[dict]:
-    """Agrega cost_usd por field (provider/project/model_id/task_type)."""
-    if field not in {"provider", "project", "model_id", "task_type"}:
-        raise ValueError(f"field invalido: {field}")
-    init_db()
-    sql = f"""
-        SELECT {field} as key,
-               COUNT(*) as calls,
-               SUM(tokens_in) as tokens_in,
-               SUM(tokens_out) as tokens_out,
-               SUM(cost_usd) as cost_usd
-        FROM llm_calls
-        WHERE 1=1
-    """
-    params: list = []
-    if start:
-        sql += " AND timestamp >= ?"
-        params.append(start)
-    if end:
-        sql += " AND timestamp <= ?"
-        params.append(end)
-    sql += f" GROUP BY {field} ORDER BY cost_usd DESC"
+    """Re-export de ``geo_finops.aggregates.aggregate_by`` (compat 1.x).
 
-    conn = get_connection()
-    try:
-        return [dict(r) for r in conn.execute(sql, params).fetchall()]
-    finally:
-        conn.close()
+    A logica foi movida para ``aggregates.py`` para permitir reuso fora
+    do tracker. Esta stub-wrapper mantem a API existente intacta.
+    """
+    from .aggregates import aggregate_by as _agg_by
+
+    return _agg_by(field, start=start, end=end)

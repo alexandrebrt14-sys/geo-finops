@@ -1,28 +1,34 @@
 #!/usr/bin/env python3
 """aggregate_dashboard.py — dashboard HTML agregado de IA solo (B-022).
 
-Achado B-022 da auditoria de ecossistema 2026-04-08 (Onda 3 filtrada
-para projeto solo). Antes deste script, nao havia visao consolidada
-de uso de LLM em todo o ecossistema. Cada repo tinha seu proprio:
+Consolida tres fontes:
 
-- geo-orchestrator/.kpi_history.jsonl  (KPIs por execucao)
-- ~/.config/geo-finops/calls.db        (calls registradas, multi-projeto)
-- caramaschi.fly.dev/finops             (estado em producao 24/7)
+- ``~/.config/geo-finops/calls.db`` (SQLite local multi-projeto)
+- ``geo-orchestrator/.kpi_history.jsonl`` (KPIs por execucao)
+- ``caramaschi.fly.dev/finops`` (snapshot producao, opcional)
 
-Este script consolida tudo em UM arquivo HTML estatico que pode ser:
-- Aberto direto no navegador (file://)
+Gera UM arquivo HTML estatico (Chart.js inline) que pode ser:
+
+- Aberto direto no browser (file://)
 - Servido via static host
 - Enviado por email semanal
 - Anexado em relatorio mensal
 
 Uso:
+
     python scripts/aggregate_dashboard.py
     python scripts/aggregate_dashboard.py --output ~/.cache/geo-dashboard.html
-    python scripts/aggregate_dashboard.py --since 30  # ultimos 30 dias
+    python scripts/aggregate_dashboard.py --since 30
 
-Por que solo: este eh um dashboard para UMA pessoa olhar de vez em
-quando — nao precisa de auth, multi-tenant, real-time, ou frontend
-React. HTML estatico Chart.js inline atende perfeitamente.
+Por que "solo": este dashboard eh para uma pessoa olhar de vez em quando
+— nao precisa de auth, multi-tenant, realtime ou frontend React. HTML
+estatico atende perfeitamente.
+
+Refatorado em 2026-04-19: aggregations delegadas para
+``geo_finops.aggregates`` e caminhos lidos de ``geo_finops.config``.
+Os helpers privados ``_aggregate_by_project``, ``_aggregate_by_provider``,
+``_daily_timeseries`` etc. ficam aqui como wrappers in-memory (sem I/O)
+para preservar os testes de unit existentes.
 """
 
 from __future__ import annotations
@@ -30,10 +36,19 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from geo_finops.config import (  # noqa: E402
+    CARAMASCHI_FINOPS_URL,
+    get_workspace_root,
+)
+from geo_finops.db import get_connection, get_db_path  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -42,16 +57,14 @@ logger = logging.getLogger(__name__)
 
 
 def _load_geo_finops_calls(since_days: int = 30) -> list[dict]:
-    """Le calls.db do geo-finops local."""
-    from geo_finops.db import get_db_path
+    """Le calls.db do geo-finops local (janela recente)."""
     db_path = get_db_path()
     if not db_path.exists():
         logger.info("geo-finops calls.db nao existe em %s", db_path)
         return []
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=since_days)).isoformat()
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
+    conn = get_connection()
     try:
         rows = conn.execute(
             """SELECT timestamp, project, provider, model_id, task_type,
@@ -67,18 +80,30 @@ def _load_geo_finops_calls(since_days: int = 30) -> list[dict]:
 
 
 def _load_orchestrator_kpis(since_days: int = 30) -> list[dict]:
-    """Le .kpi_history.jsonl do geo-orchestrator (se path configurado)."""
-    candidates = [
+    """Le ``.kpi_history.jsonl`` do geo-orchestrator.
+
+    Tenta, nesta ordem:
+
+    1. ``~/.cache/geo-orchestrator/.kpi_history.jsonl``
+    2. ``<workspace>/geo-orchestrator/output/.kpi_history.jsonl`` (layout canonico)
+    3. ``../geo-orchestrator/output/.kpi_history.jsonl`` (cwd-relative)
+
+    Nao quebra se nenhum existe — retorna lista vazia.
+    """
+    workspace = get_workspace_root()
+    candidates: list[Path] = [
         Path.home() / ".cache" / "geo-orchestrator" / ".kpi_history.jsonl",
-        Path("C:/Sandyboxclaude/geo-orchestrator/output/.kpi_history.jsonl"),
-        Path.cwd().parent / "geo-orchestrator" / "output" / ".kpi_history.jsonl",
     ]
+    if workspace:
+        candidates.append(workspace / "geo-orchestrator" / "output" / ".kpi_history.jsonl")
+    candidates.append(Path.cwd().parent / "geo-orchestrator" / "output" / ".kpi_history.jsonl")
+
     for path in candidates:
         try:
             if path.exists():
                 logger.info("KPI history em %s", path)
-                entries = []
-                with open(path, "r", encoding="utf-8") as f:
+                entries: list[dict] = []
+                with open(path, encoding="utf-8") as f:
                     for line in f:
                         line = line.strip()
                         if not line:
@@ -87,18 +112,18 @@ def _load_orchestrator_kpis(since_days: int = 30) -> list[dict]:
                             entries.append(json.loads(line))
                         except json.JSONDecodeError:
                             continue
-                return entries[-100:]  # ultimos 100
+                return entries[-100:]
         except OSError:
             continue
     return []
 
 
 def _try_caramaschi_finops() -> dict | None:
-    """Tenta GET caramaschi.fly.dev/finops (timeout curto, fail-graceful)."""
+    """Tenta GET do snapshot caramaschi (timeout curto, fail-graceful)."""
     try:
         import httpx
-        url = "https://caramaschi.fly.dev/finops"
-        resp = httpx.get(url, timeout=5.0)
+
+        resp = httpx.get(CARAMASCHI_FINOPS_URL, timeout=5.0)
         if resp.status_code == 200:
             return resp.json()
     except Exception as exc:
@@ -106,28 +131,24 @@ def _try_caramaschi_finops() -> dict | None:
     return None
 
 
-# ─── Agregacoes ───────────────────────────────────────────────────────────
+# ─── Agregacoes in-memory (preservam API dos testes) ──────────────────────
 
 
 def _aggregate_by_project(calls: list[dict]) -> dict[str, dict]:
-    """Agrega por projeto: total cost, total calls, top model."""
+    """Agrega por projeto: total cost, calls, top model."""
     by_project: dict[str, dict] = {}
     for c in calls:
         proj = c.get("project") or "unknown"
-        if proj not in by_project:
-            by_project[proj] = {
-                "calls": 0,
-                "cost": 0.0,
-                "tokens_in": 0,
-                "tokens_out": 0,
-                "models": {},
-            }
-        by_project[proj]["calls"] += 1
-        by_project[proj]["cost"] += c.get("cost_usd") or 0.0
-        by_project[proj]["tokens_in"] += c.get("tokens_in") or 0
-        by_project[proj]["tokens_out"] += c.get("tokens_out") or 0
-        m = c.get("model_id") or "unknown"
-        by_project[proj]["models"][m] = by_project[proj]["models"].get(m, 0) + 1
+        entry = by_project.setdefault(
+            proj,
+            {"calls": 0, "cost": 0.0, "tokens_in": 0, "tokens_out": 0, "models": {}},
+        )
+        entry["calls"] += 1
+        entry["cost"] += c.get("cost_usd") or 0.0
+        entry["tokens_in"] += c.get("tokens_in") or 0
+        entry["tokens_out"] += c.get("tokens_out") or 0
+        model = c.get("model_id") or "unknown"
+        entry["models"][model] = entry["models"].get(model, 0) + 1
     return by_project
 
 
@@ -135,23 +156,21 @@ def _aggregate_by_provider(calls: list[dict]) -> dict[str, dict]:
     by_provider: dict[str, dict] = {}
     for c in calls:
         prov = c.get("provider") or "unknown"
-        if prov not in by_provider:
-            by_provider[prov] = {"calls": 0, "cost": 0.0}
-        by_provider[prov]["calls"] += 1
-        by_provider[prov]["cost"] += c.get("cost_usd") or 0.0
+        entry = by_provider.setdefault(prov, {"calls": 0, "cost": 0.0})
+        entry["calls"] += 1
+        entry["cost"] += c.get("cost_usd") or 0.0
     return by_provider
 
 
 def _daily_timeseries(calls: list[dict]) -> dict[str, dict]:
-    """Agrega por dia (UTC): cost + calls."""
+    """Agrega por dia (UTC): cost + calls, ordenado por data."""
     by_day: dict[str, dict] = {}
     for c in calls:
         ts = c.get("timestamp") or ""
         day = ts[:10] if ts else "unknown"
-        if day not in by_day:
-            by_day[day] = {"cost": 0.0, "calls": 0}
-        by_day[day]["cost"] += c.get("cost_usd") or 0.0
-        by_day[day]["calls"] += 1
+        entry = by_day.setdefault(day, {"cost": 0.0, "calls": 0})
+        entry["cost"] += c.get("cost_usd") or 0.0
+        entry["calls"] += 1
     return dict(sorted(by_day.items()))
 
 
@@ -323,13 +342,10 @@ def render_dashboard(since_days: int = 30) -> str:
 
     total_cost = sum(c.get("cost_usd") or 0 for c in calls)
     total_calls = len(calls)
-    total_tokens = sum(
-        (c.get("tokens_in") or 0) + (c.get("tokens_out") or 0) for c in calls
-    )
+    total_tokens = sum((c.get("tokens_in") or 0) + (c.get("tokens_out") or 0) for c in calls)
     n_projects = len(by_project)
 
-    # Project rows
-    project_rows_html = []
+    project_rows_html: list[str] = []
     for proj, data in sorted(by_project.items(), key=lambda x: -x[1]["cost"]):
         top_model = max(data["models"].items(), key=lambda x: x[1])[0] if data["models"] else "—"
         project_rows_html.append(
@@ -340,8 +356,7 @@ def render_dashboard(since_days: int = 30) -> str:
             f"<td><code>{top_model}</code></td></tr>"
         )
 
-    # Provider rows
-    provider_rows_html = []
+    provider_rows_html: list[str] = []
     for prov, data in sorted(by_provider.items(), key=lambda x: -x[1]["cost"]):
         pct = (data["cost"] / total_cost * 100) if total_cost > 0 else 0
         provider_rows_html.append(
@@ -351,18 +366,16 @@ def render_dashboard(since_days: int = 30) -> str:
             f"<td class='num'>{pct:.1f}%</td></tr>"
         )
 
-    # caramaschi snapshot (opcional, soh se reachable)
     caramaschi_html = ""
     if caramaschi:
         keys = list(caramaschi.keys())[:5]
         caramaschi_html = (
             "<div class='section'><h2>caramaschi.fly.dev /finops snapshot</h2>"
-            f"<pre style='font-size:.8rem;color:#CBD5E1;overflow-x:auto'>"
+            "<pre style='font-size:.8rem;color:#CBD5E1;overflow-x:auto'>"
             f"{json.dumps({k: caramaschi[k] for k in keys}, indent=2, ensure_ascii=False)[:1500]}"
             "</pre></div>"
         )
 
-    # Daily chart data
     daily_labels = json.dumps(list(daily.keys())[-30:])
     daily_costs = json.dumps([round(d["cost"], 4) for d in list(daily.values())[-30:]])
 
@@ -373,8 +386,10 @@ def render_dashboard(since_days: int = 30) -> str:
         total_calls=total_calls,
         total_tokens=total_tokens,
         n_projects=n_projects,
-        project_rows="\n".join(project_rows_html) or "<tr><td colspan='5' style='text-align:center;color:#64748B'>Nenhum dado encontrado</td></tr>",
-        provider_rows="\n".join(provider_rows_html) or "<tr><td colspan='4' style='text-align:center;color:#64748B'>Nenhum dado encontrado</td></tr>",
+        project_rows="\n".join(project_rows_html)
+        or "<tr><td colspan='5' style='text-align:center;color:#64748B'>Nenhum dado encontrado</td></tr>",
+        provider_rows="\n".join(provider_rows_html)
+        or "<tr><td colspan='4' style='text-align:center;color:#64748B'>Nenhum dado encontrado</td></tr>",
         caramaschi_section=caramaschi_html,
         daily_labels=daily_labels,
         daily_costs=daily_costs,
@@ -384,15 +399,27 @@ def render_dashboard(since_days: int = 30) -> str:
 # ─── CLI ──────────────────────────────────────────────────────────────────
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", "-o", type=Path,
-                        default=Path.home() / ".cache" / "geo-dashboard.html",
-                        help="Caminho de saida do HTML")
-    parser.add_argument("--since", type=int, default=30,
-                        help="Janela em dias (default: 30)")
-    parser.add_argument("--print", action="store_true",
-                        help="Imprime resumo no stdout")
+    parser.add_argument(
+        "--output",
+        "-o",
+        type=Path,
+        default=Path.home() / ".cache" / "geo-dashboard.html",
+        help="Caminho de saida do HTML",
+    )
+    parser.add_argument(
+        "--since",
+        type=int,
+        default=30,
+        help="Janela em dias (default: 30)",
+    )
+    parser.add_argument(
+        "--print",
+        dest="print_summary",
+        action="store_true",
+        help="Imprime resumo no stdout",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -404,13 +431,11 @@ def main():
     print(f"Tamanho: {args.output.stat().st_size:,} bytes")
     print(f"Para abrir: file:///{args.output.as_posix()}")
 
-    if args.print:
-        # Resumo rapido no terminal
-        from geo_finops.db import get_db_path
-        print(f"\nFontes:")
+    if args.print_summary:
+        print("\nFontes:")
         print(f"  geo-finops calls.db:  {get_db_path()}")
-        print(f"  KPI history:           ~/.cache/geo-orchestrator/.kpi_history.jsonl")
-        print(f"  caramaschi /finops:    https://caramaschi.fly.dev/finops")
+        print("  KPI history:           ~/.cache/geo-orchestrator/.kpi_history.jsonl")
+        print(f"  caramaschi /finops:    {CARAMASCHI_FINOPS_URL}")
     return 0
 
 

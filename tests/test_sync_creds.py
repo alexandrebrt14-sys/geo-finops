@@ -6,7 +6,6 @@ de path absoluto. Achado F11 da auditoria de ecossistema 2026-04-08.
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -19,7 +18,6 @@ from geo_finops.sync import (  # noqa: E402
     _load_supabase_creds,
     _parse_env_file,
 )
-
 
 # ---------------------------------------------------------------------------
 # _parse_env_file — leitura robusta de .env
@@ -38,7 +36,7 @@ def test_parse_env_file_basic(tmp_path):
 def test_parse_env_file_strips_quotes(tmp_path):
     """Strippa aspas simples e duplas dos valores."""
     env = tmp_path / ".env"
-    env.write_text('A="value_a"\nB=\'value_b\'\nC=value_c\n')
+    env.write_text("A=\"value_a\"\nB='value_b'\nC=value_c\n")
     result = _parse_env_file(env)
     assert result == {"A": "value_a", "B": "value_b", "C": "value_c"}
 
@@ -46,13 +44,7 @@ def test_parse_env_file_strips_quotes(tmp_path):
 def test_parse_env_file_ignores_comments_and_blank(tmp_path):
     """Comentarios e linhas vazias sao ignorados."""
     env = tmp_path / ".env"
-    env.write_text(
-        "# This is a comment\n"
-        "\n"
-        "FOO=bar\n"
-        "   # Indented comment\n"
-        "BAZ=qux\n"
-    )
+    env.write_text("# This is a comment\n\nFOO=bar\n   # Indented comment\nBAZ=qux\n")
     result = _parse_env_file(env)
     assert result == {"FOO": "bar", "BAZ": "qux"}
 
@@ -86,6 +78,7 @@ def test_candidate_files_no_windows_hardcoded_in_source():
     da localizacao real do arquivo no disco).
     """
     import inspect
+
     from geo_finops.sync import _candidate_env_files
 
     source = inspect.getsource(_candidate_env_files)
@@ -109,18 +102,16 @@ def test_candidate_files_includes_xdg_default():
     """~/.config/geo-finops/.env sempre presente como candidato."""
     candidates = _candidate_env_files()
     paths = [str(p).replace("\\", "/") for p in candidates]
-    assert any(
-        ".config/geo-finops/.env" in p for p in paths
-    ), f"XDG default nao encontrado em: {paths}"
+    assert any(".config/geo-finops/.env" in p for p in paths), (
+        f"XDG default nao encontrado em: {paths}"
+    )
 
 
 def test_candidate_files_includes_home_dotfile():
     """~/.geo-finops.env sempre presente como candidato."""
     candidates = _candidate_env_files()
     paths = [str(p).replace("\\", "/") for p in candidates]
-    assert any(
-        ".geo-finops.env" in p for p in paths
-    ), f"Home dotfile nao encontrado em: {paths}"
+    assert any(".geo-finops.env" in p for p in paths), f"Home dotfile nao encontrado em: {paths}"
 
 
 def test_candidate_files_honors_explicit_override(monkeypatch, tmp_path):
@@ -165,9 +156,7 @@ def test_load_creds_falls_back_to_explicit_file(monkeypatch, tmp_path):
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
 
     env_file = tmp_path / "explicit.env"
-    env_file.write_text(
-        "SUPABASE_URL=https://from-file.supabase.co\nSUPABASE_KEY=key-from-file\n"
-    )
+    env_file.write_text("SUPABASE_URL=https://from-file.supabase.co\nSUPABASE_KEY=key-from-file\n")
     monkeypatch.setenv("GEO_FINOPS_ENV_FILE", str(env_file))
 
     url, key = _load_supabase_creds()
@@ -183,8 +172,7 @@ def test_load_creds_accepts_service_role_alias(monkeypatch, tmp_path):
 
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "SUPABASE_URL=https://x.supabase.co\n"
-        "SUPABASE_SERVICE_ROLE_KEY=role-key-123\n"
+        "SUPABASE_URL=https://x.supabase.co\nSUPABASE_SERVICE_ROLE_KEY=role-key-123\n"
     )
     monkeypatch.setenv("GEO_FINOPS_ENV_FILE", str(env_file))
 

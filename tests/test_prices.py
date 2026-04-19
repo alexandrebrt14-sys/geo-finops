@@ -59,7 +59,7 @@ def test_list_models_anthropic():
 
 def test_list_models_all():
     models = list_models()
-    assert len(models) >= 10  # 5 providers × 2+ models
+    assert len(models) >= 10  # 5 providers x 2+ models
 
 
 # ─── get_price — valores canonicos ────────────────────────────────────────

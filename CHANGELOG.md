@@ -2,64 +2,84 @@
 
 Histórico de versões do `geo-finops`. Segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/) e [SemVer](https://semver.org/lang/pt-BR/).
 
-## [1.1.0] — 2026-04-07
+## [2.0.0] — 2026-04-19
 
-### Added
-- **`scripts/health_check.py`** com 13 dimensões de validação ponta-a-ponta. Sai com código 0 se passou. Reproduzível.
-- **`_normalize_timestamp()`** em `tracker.py` — garante que todos os caminhos de tracking (Python local, Next.js server-side, manual) gerem ISO 8601 UTC idêntico. Resolve falsas duplicatas por diferença de microsegundos entre callers.
-- **Retry exponencial** em `sync.py::push_batch()` — 3 tentativas com backoff `1s/2.5s/5s` para erros 5xx e de rede. Erros 4xx fatais (`401/403/422`) não fazem retry.
-- **Tratamento de HTTP 409 como sucesso** — quando todo o batch consiste de duplicatas, Postgres retorna `409 Conflict (23505)`. Antes, sync marcava como erro permanente; agora trata como idempotência funcionando.
-- **`scripts/bootstrap_supabase.py`** — verifica conectividade Supabase e, se a tabela não existir, imprime o DDL pronto para colar no SQL editor.
-- **`install_task.cmd`** — alternativa ao `install_scheduler.ps1` que usa `schtasks /Create` (não precisa de privilégios elevados).
-- **`scripts/export_snapshot.py`** — gera `landing-page-geo/public/finops-snapshot.json` consumido pelo dashboard live.
+Refatoração completa em 7 ondas aplicando organização, eficácia e eficiência. **API pública estável** (sem quebra de `track_call`, `query_calls`, `get_db_path`, `aggregate_by`, `run_id_for_session`). Detalhes em [`docs/REFACTOR-2026-04-19.md`](docs/REFACTOR-2026-04-19.md).
 
-### Fixed
-- **Bug crítico de re-sync** ([commit 109dfe5](https://github.com/alexandrebrt14-sys/geo-finops/commit/109dfe5)): a sincronização noturna falharia silenciosamente em catch-ups. Causa raiz: 409 Conflict mal interpretado como erro fatal. Detectado durante double-check end-to-end com testes reais.
-- **Bug de duplicatas falsas por timestamp**: o mesmo logical-call gravado por dois caminhos (ex: `llm_utils` Python local com `.898307` µs vs `/api/finops/track` Next.js sem µs) escapava do dedup porque os timestamps não batiam exatamente. Resolvido normalizando todos para ISO 8601 UTC com `datetime.fromisoformat().astimezone(timezone.utc).isoformat()`.
+### Adicionado
 
-### Changed
-- `Prefer: resolution=merge-duplicates,return=minimal` → `Prefer: resolution=ignore-duplicates,return=minimal`. PostgREST não aceita `on_conflict` com índices expressionais (que usam `COALESCE`). `ignore-duplicates` funciona com qualquer constraint UNIQUE.
-- `_LLM_TO_PROVIDER` no `tracker.py` agora aceita 3 formatos: nome de provider, nome interno LLM_CONFIGS, e **model id real** (ex: `claude-opus-4-6`).
+- Módulo `geo_finops.config` como fonte única para paths, parsing de `.env` e loading de credenciais (Supabase + WhatsApp).
+- Módulo `geo_finops.aggregates` com queries SQL reusáveis (`totals`, `aggregate_by`, `top_models`, `daily_timeseries`, `top_hotspots`, `sync_status_counts`).
+- Pacote `geo_finops.digest` (split do antigo `scripts/weekly_digest.py`) com 4 submódulos coesos: `cloud`, `builders`, `formatters`, `reporters`.
+- Novas env vars: `GEO_FINOPS_CONFIG_DIR`, `GEO_FINOPS_DB_PATH`, `GEO_FINOPS_SNAPSHOT_PATH`, `GEO_FINOPS_ENV_FILE`, `GEO_FINOPS_FLY_USD_MONTH`, `GEO_FINOPS_VERCEL_USD_MONTH`, `GEO_FINOPS_ALERT_DELTA_PCT`, `GEO_FINOPS_WHATSAPP_OWNER`, `GEO_FINOPS_CARAMASCHI_URL`.
+- Entry points no `pyproject.toml`: `geo-finops` e `geo-finops-sync`.
+- Configurações completas de tooling: `[tool.pytest.ini_options]`, `[tool.coverage]`, `[tool.ruff]`, `[tool.mypy]`.
+- `.pre-commit-config.yaml` padrão (pre-commit-hooks, ruff, mypy, bandit, gitleaks, pytest).
+- 78 testes novos: `tests/test_config.py`, `tests/test_tracker.py`, `tests/test_aggregates.py`, `tests/test_digest.py` + `tests/conftest.py` com fixture `isolated_db`.
+- Dependências opcionais declaradas: grupos `test` (pytest, pytest-cov) e `dev` (ruff, mypy, pre-commit, pyyaml).
 
-### Validated end-to-end
-4 testes reais executados manualmente antes do release:
-1. `query_openai()` real via `llm_utils.py` instrumentado → SQLite ✅
-2. `client.messages.create()` real do Anthropic via caramaschi handler → SQLite ✅
-3. `POST /api/finops/track` em produção (alexandrecaramaschi.com) → Supabase ✅
-4. Re-sync idempotente forçado → 0 errors, 0 duplicatas ✅
+### Modificado
 
-Health check rodado **3 vezes consecutivas** após o fix: 13/13 passing em todas.
+- `geo_finops/db.py` agora delega resolução de path para `config.get_db_path`.
+- `geo_finops/sync.py` consome credenciais via `config.load_supabase_creds`; helpers `_candidate_env_files`, `_parse_env_file`, `_load_supabase_creds` viraram re-exports (preservam os 14 testes existentes).
+- `geo_finops/tracker.py`: `aggregate_by` delega para `aggregates.aggregate_by` (compat layer).
+- `geo_finops/migrate.py` resolve raiz do workspace via `config.get_workspace_root` (no-op se workspace ausente, permite CI genérico).
+- `geo_finops/cli.py` usa `aggregates.sync_status_counts` em `cmd_status`.
+- Scripts refatorados para consumir `config` + `aggregates`: `bootstrap_supabase.py`, `export_snapshot.py`, `aggregate_dashboard.py`, `health_check.py`, `weekly_digest.py`.
+- `scripts/weekly_digest.py` virou thin CLI (60 LOC); lógica vive em `geo_finops.digest`.
+- `pyproject.toml` expandido (17 → ~100 linhas).
+- `__version__` bumpado para `2.0.0`.
 
-## [1.0.0] — 2026-04-07 (release inicial)
+### Removido
 
-### Added
-- **Pacote `geo_finops`** com schema único SQLite WAL em `~/.config/geo-finops/calls.db`
-- **`tracker.py`**: API pública `track_call()`, `query_calls()`, `aggregate_by()`. Inferência automática de provider via `model_id`.
-- **`db.py`**: Schema com `UNIQUE(timestamp, project, COALESCE(run_id,''), model_id)`. WAL mode + busy_timeout 10s.
-- **`migrate.py`**: Migrações dos 4 trackers legados (orchestrator JSONL, papers SQLite, curso-factory JSON, caramaschi).
-- **`sync.py`**: Worker que envia pending → Supabase `finops_calls` em batches de 500.
-- **`cli.py`**: Comandos `status`, `summary --by {provider,project,model_id,task_type}`, `list`, `migrate`, `sync`.
-- **`scripts/export_snapshot.py`**: Gera snapshot JSON consumido pelo dashboard `alexandrecaramaschi.com/finops`.
-- **`install_scheduler.ps1`**: Registra Task Scheduler do Windows para sync diário 23:50.
-- **4 adapters thin** em cada projeto: no-op se `geo_finops` indisponível, garante backwards compat total.
+- **Paths Windows hardcoded** em 4 scripts (`C:/Sandyboxclaude/...` que quebravam em Linux/Mac/Fly.io). Zero ocorrências restantes.
+- **Duplicação de parsing de `.env`** em 4 locais (consolidada em `config.parse_env_file`).
+- **Duplicação de SQL de agregação** em 3 locais (consolidada em `aggregates`).
 
-### Migração inicial
-- 1.467 calls migradas de 4 trackers paralelos
-- $254,17 (orchestrator) + $0,14 (papers) + $1,12 (curso-factory)
-- Schema unificado: `(timestamp, project, run_id, task_type, model_id, provider, tokens_in, tokens_out, cost_usd, success, metadata, sync_status)`
+### Fixo
 
-### Background
-A auditoria FinOps de 2026-04-07 detectou via OpenAI admin API **769 calls reais** vs **264 nos trackers locais conhecidos** = **505 calls órfãs**, 100% em `gpt-4o-mini`. O `geo-finops` foi criado para resolver definitivamente esse gap unificando todos os trackers e instrumentando os callers órfãos.
+- `scripts/weekly_digest.py` não depende mais de path absoluto para o `.env` do caramaschi: credenciais via `config.load_whatsapp_creds`.
+- `scripts/health_check.py` não quebra em hosts sem workspace canônico: adapters e callers órfãos pulam graciosamente.
 
-## Próximas versões planejadas
+### Métricas
 
-### [1.2.0] — Q2 2026 (planejado)
-- BigQuery export opcional para análise histórica
-- Dashboard web standalone (opcional, sem depender do landing-page-geo)
-- Métricas Prometheus para Grafana
-- Backup automático do `calls.db` para Supabase Storage semanal
+| | Antes (1.1) | Depois (2.0) |
+|---|---:|---:|
+| Testes | 57 | 149 |
+| Cobertura | ~25% | 54% |
+| LOC duplicadas | ~180 | 0 |
+| Paths hardcoded | 4 | 0 |
+| Health check E2E | 13/13 | 13/13 |
 
-### [2.0.0] — futuro
-- Suporte a múltiplos workspaces (multi-tenant)
-- Integração nativa com OpenTelemetry
-- gRPC API alternativa ao SQLite local para contextos distribuídos
+## [1.1.0] — 2026-04-08
+
+Robustez + observabilidade (Wave F solo).
+
+### Adicionado
+
+- `geo_finops/prices.py` + `geo_finops/prices.yaml`: fonte única de preços LLM com 5 providers e 11 modelos. Funções `get_price`, `calculate_cost`, `list_providers`, `list_models`, `get_model_info`. 21 testes.
+- `scripts/aggregate_dashboard.py`: dashboard HTML estático agregando 3 fontes. 12 testes.
+- Alembic baseline com 10 testes de compatibilidade.
+- Security scan workflow (bandit + pip-audit + gitleaks semanalmente).
+- Pre-commit `secret_guard`.
+
+### Modificado
+
+- `geo_finops/sync.py`: `_load_supabase_creds` portável (F11) — busca em 6 fontes.
+- 14 testes em `tests/test_sync_creds.py` cobrindo parser, candidates, loader.
+
+## [1.0.0] — 2026-04-07
+
+Release inicial — consolidação de tracking LLM.
+
+### Adicionado
+
+- Pacote `geo_finops` com `track_call`, `query_calls`, `aggregate_by`, `run_id_for_session`, `get_db_path`, `init_db`, `get_connection`.
+- SQLite local WAL em `~/.config/geo-finops/calls.db` com UNIQUE constraint.
+- Sync worker para Supabase com retry exponencial.
+- HTTP 409 tratado como sucesso silencioso (idempotência).
+- CLI com subcomandos `status`, `summary`, `list`, `migrate`, `sync`.
+- Migration histórica de 4 trackers paralelos: 1.467 linhas.
+- `scripts/health_check.py` com 13 dimensões.
+- Task Scheduler `GeoFinOpsSync` diário às 23:50.
+- 4 adapters thin nos projetos consumidores.

@@ -1,13 +1,18 @@
 """Migracao dos historicos legados para o calls.db unificado.
 
 Le:
-- geo-orchestrator/output/cost_history.jsonl
-- geo-orchestrator/output/execution_*.json (mais detalhado, preferido)
-- curso-factory/output/costs.json
-- papers/data/papers.db::finops_usage
-- caramaschi/src/scripts/ac_core/finops (se existir)
 
-Idempotente via UNIQUE constraint (timestamp, project, run_id, model_id).
+- ``geo-orchestrator/output/execution_*.json``  (preferido, detalhado por task)
+- ``curso-factory/output/costs.json``
+- ``papers/data/papers.db::finops_usage``
+- ``caramaschi`` finops_log.jsonl (3 candidates)
+
+Idempotente via UNIQUE constraint
+``(timestamp, project, COALESCE(run_id, ''), model_id)``.
+
+Refatorado em 2026-04-19: a raiz do workspace agora vem de
+``config.get_workspace_root`` (antes usava ``parents[2]`` inline).
+Se o workspace canonico nao existir, cada migracao retorna 0 sem erro.
 """
 
 from __future__ import annotations
@@ -17,21 +22,29 @@ import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
 
+from .config import get_workspace_root
 from .db import get_connection, init_db
-from .tracker import track_call, _infer_provider
+from .tracker import track_call
 
 logger = logging.getLogger(__name__)
 
-ROOT = Path(__file__).resolve().parents[2]  # C:/Sandyboxclaude
+
+def _workspace_or_none() -> Path | None:
+    """Retorna o workspace canonico (pai do repo) ou None.
+
+    Se None, toda migracao que depende de sibling repos vira no-op.
+    """
+    ws = get_workspace_root()
+    return ws if ws and ws.exists() else None
 
 
 def _record_migration(name: str, source: str, rows: int) -> None:
     conn = get_connection()
     try:
         conn.execute(
-            "INSERT OR REPLACE INTO migrations (name, applied_at, source_file, rows_added) VALUES (?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO migrations "
+            "(name, applied_at, source_file, rows_added) VALUES (?, ?, ?, ?)",
             (name, datetime.now(timezone.utc).isoformat(), source, rows),
         )
     finally:
@@ -39,12 +52,17 @@ def _record_migration(name: str, source: str, rows: int) -> None:
 
 
 def migrate_orchestrator() -> int:
-    """Migra geo-orchestrator/output/execution_*.json (detalhe por task).
+    """Migra ``geo-orchestrator/output/execution_*.json``.
 
-    run_id inclui task_id para evitar dedup colapsar tasks com mesmo modelo
-    (todas as tasks da mesma execucao compartilham timestamp).
+    ``run_id`` inclui ``task_id`` para evitar que dedup colapse tasks com
+    mesmo modelo (todas as tasks da mesma execucao compartilham timestamp).
     """
-    out_dir = ROOT / "geo-orchestrator" / "output"
+    workspace = _workspace_or_none()
+    if workspace is None:
+        return 0
+    out_dir = workspace / "geo-orchestrator" / "output"
+    if not out_dir.exists():
+        return 0
     files = sorted(out_dir.glob("execution_*.json"))
     inserted = 0
     for fp in files:
@@ -66,7 +84,11 @@ def migrate_orchestrator() -> int:
                 task_type=r.get("task_type"),
                 success=bool(r.get("success", True)),
                 timestamp=base_ts,
-                metadata={"agent": r.get("agent_name"), "task_id": task_id, "execution_run": base_run_id},
+                metadata={
+                    "agent": r.get("agent_name"),
+                    "task_id": task_id,
+                    "execution_run": base_run_id,
+                },
             )
             if ok:
                 inserted += 1
@@ -75,8 +97,11 @@ def migrate_orchestrator() -> int:
 
 
 def migrate_curso_factory() -> int:
-    """Migra curso-factory/output/costs.json."""
-    fp = ROOT / "curso-factory" / "output" / "costs.json"
+    """Migra ``curso-factory/output/costs.json``."""
+    workspace = _workspace_or_none()
+    if workspace is None:
+        return 0
+    fp = workspace / "curso-factory" / "output" / "costs.json"
     if not fp.exists():
         return 0
     try:
@@ -104,8 +129,11 @@ def migrate_curso_factory() -> int:
 
 
 def migrate_papers() -> int:
-    """Migra papers/data/papers.db::finops_usage."""
-    fp = ROOT / "papers" / "data" / "papers.db"
+    """Migra ``papers/data/papers.db::finops_usage``."""
+    workspace = _workspace_or_none()
+    if workspace is None:
+        return 0
+    fp = workspace / "papers" / "data" / "papers.db"
     if not fp.exists():
         return 0
     inserted = 0
@@ -124,7 +152,10 @@ def migrate_papers() -> int:
                 success=True,
                 provider=r["platform"],
                 timestamp=r["timestamp"],
-                metadata={"vertical": r["vertical"], "query": (r["query"] or "")[:200]},
+                metadata={
+                    "vertical": r["vertical"],
+                    "query": (r["query"] or "")[:200],
+                },
             )
             if ok:
                 inserted += 1
@@ -136,11 +167,14 @@ def migrate_papers() -> int:
 
 
 def migrate_caramaschi() -> int:
-    """Migra caramaschi se houver tracker estruturado."""
+    """Migra ``caramaschi`` se houver ``finops_log.jsonl`` estruturado."""
+    workspace = _workspace_or_none()
+    if workspace is None:
+        return 0
     candidates = [
-        ROOT / "caramaschi" / "src" / "scripts" / "ac_core" / "finops_log.jsonl",
-        ROOT / "caramaschi" / "src" / "data" / "finops_log.jsonl",
-        ROOT / "caramaschi" / "data" / "finops_log.jsonl",
+        workspace / "caramaschi" / "src" / "scripts" / "ac_core" / "finops_log.jsonl",
+        workspace / "caramaschi" / "src" / "data" / "finops_log.jsonl",
+        workspace / "caramaschi" / "data" / "finops_log.jsonl",
     ]
     inserted = 0
     for fp in candidates:

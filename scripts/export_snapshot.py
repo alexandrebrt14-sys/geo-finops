@@ -1,118 +1,62 @@
-"""Exporta snapshot agregado do calls.db para JSON consumido pelo site.
+"""Exporta snapshot agregado do ``calls.db`` para JSON consumido pelo site.
 
-Roda local (ou pelo Task Scheduler) e gera:
-  landing-page-geo/public/finops-snapshot.json
+Roda local (ou pelo Task Scheduler) e gera por default:
 
-O site Next.js pode entao fazer fetch do snapshot via /finops-snapshot.json
-ou via API route que faz import dele com revalidacao ISR.
+    <workspace>/landing-page-geo/public/finops-snapshot.json
+
+O site Next.js le o snapshot via ``/finops-snapshot.json`` ou via API
+route com ISR revalidation.
 
 Conteudo do snapshot:
-  - generated_at, period
-  - totals: {calls, cost_usd, tokens_in, tokens_out, projects, providers}
-  - by_provider, by_project, by_model
-  - daily series (ultimos 30 dias)
-  - top 10 modelos
+
+- ``generated_at``, ``period``, ``schema_version``
+- ``totals``: ``{calls, cost_usd, tokens_in, tokens_out, projects, providers}``
+- ``by_provider``, ``by_project``, ``by_model``
+- ``daily`` (serie dos ultimos 30 dias)
+
+Refatorado em 2026-04-19: todas as queries foram movidas para
+``geo_finops.aggregates``, e o path de saida passa a respeitar
+``GEO_FINOPS_SNAPSHOT_PATH`` (override) ou o workspace canonico.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 
-# Adiciona path do pacote
-HERE = Path(__file__).resolve().parent
-ROOT_PKG = HERE.parent
-sys.path.insert(0, str(ROOT_PKG))
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-from geo_finops.db import get_connection, init_db
-
-
-SITE_OUTPUT = Path("C:/Sandyboxclaude/landing-page-geo/public/finops-snapshot.json")
+from geo_finops import aggregates  # noqa: E402
+from geo_finops.config import get_snapshot_path  # noqa: E402
+from geo_finops.db import get_connection, init_db  # noqa: E402
 
 
-def build_snapshot() -> dict:
+def build_snapshot(days: int = 30) -> dict:
     init_db()
     conn = get_connection()
     try:
-        # Totais
-        totals = conn.execute("""
-            SELECT
-                COUNT(*)            as calls,
-                COALESCE(SUM(cost_usd), 0)   as cost_usd,
-                COALESCE(SUM(tokens_in), 0)  as tokens_in,
-                COALESCE(SUM(tokens_out), 0) as tokens_out
-            FROM llm_calls
-        """).fetchone()
-
-        # Periodo
-        period = conn.execute("""
-            SELECT MIN(timestamp), MAX(timestamp) FROM llm_calls
-        """).fetchone()
-
-        # Por provider
-        by_provider = [dict(r) for r in conn.execute("""
-            SELECT provider as key,
-                   COUNT(*) as calls,
-                   SUM(tokens_in) as tokens_in,
-                   SUM(tokens_out) as tokens_out,
-                   SUM(cost_usd) as cost_usd
-            FROM llm_calls
-            GROUP BY provider
-            ORDER BY cost_usd DESC
-        """).fetchall()]
-
-        # Por projeto
-        by_project = [dict(r) for r in conn.execute("""
-            SELECT project as key,
-                   COUNT(*) as calls,
-                   SUM(tokens_in) as tokens_in,
-                   SUM(tokens_out) as tokens_out,
-                   SUM(cost_usd) as cost_usd
-            FROM llm_calls
-            GROUP BY project
-            ORDER BY cost_usd DESC
-        """).fetchall()]
-
-        # Top 10 modelos
-        by_model = [dict(r) for r in conn.execute("""
-            SELECT model_id as key,
-                   provider,
-                   COUNT(*) as calls,
-                   SUM(tokens_in) as tokens_in,
-                   SUM(tokens_out) as tokens_out,
-                   SUM(cost_usd) as cost_usd
-            FROM llm_calls
-            GROUP BY model_id
-            ORDER BY cost_usd DESC
-            LIMIT 15
-        """).fetchall()]
-
-        # Ultimos 30 dias (serie diaria)
-        thirty_days_ago = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-        daily = [dict(r) for r in conn.execute("""
-            SELECT substr(timestamp, 1, 10) as date,
-                   COUNT(*) as calls,
-                   SUM(cost_usd) as cost_usd
-            FROM llm_calls
-            WHERE timestamp >= ?
-            GROUP BY date
-            ORDER BY date
-        """, (thirty_days_ago,)).fetchall()]
-
-        # Counts auxiliares
-        n_projects = len({r["key"] for r in by_project})
-        n_providers = len({r["key"] for r in by_provider if r["key"] != "unknown"})
+        totals = aggregates.totals(conn=conn)
+        by_provider = aggregates.aggregate_by("provider", conn=conn)
+        by_project = aggregates.aggregate_by("project", conn=conn)
+        by_model = aggregates.top_models(limit=15, conn=conn)
+        daily = aggregates.daily_timeseries(days=days, conn=conn)
     finally:
         conn.close()
 
-    snapshot = {
+    n_providers = len({r["key"] for r in by_provider if r["key"] != "unknown"})
+    n_projects = len({r["key"] for r in by_project})
+
+    return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "schema_version": 1,
         "period": {
-            "start": period[0],
-            "end": period[1],
+            "start": totals.get("period_start"),
+            "end": totals.get("period_end"),
         },
         "totals": {
             "calls": totals["calls"],
@@ -127,24 +71,55 @@ def build_snapshot() -> dict:
         "by_model": by_model,
         "daily": daily,
     }
-    return snapshot
 
 
-def main():
-    snapshot = build_snapshot()
-    SITE_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    SITE_OUTPUT.write_text(
+def _resolve_output(cli_output: Path | None) -> Path:
+    """Ordem: ``--output`` CLI > ``GEO_FINOPS_SNAPSHOT_PATH`` > workspace > stdout fallback."""
+    if cli_output is not None:
+        return cli_output
+    from_cfg = get_snapshot_path()
+    if from_cfg is not None:
+        return from_cfg
+    # Ultimo fallback: mesmo diretorio do script
+    return ROOT / "finops-snapshot.json"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--output",
+        "-o",
+        type=Path,
+        default=None,
+        help="Path de saida (override de GEO_FINOPS_SNAPSHOT_PATH)",
+    )
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=30,
+        help="Janela da serie diaria",
+    )
+    args = parser.parse_args()
+
+    snapshot = build_snapshot(days=args.days)
+    output = _resolve_output(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
         json.dumps(snapshot, indent=2, ensure_ascii=False, default=str),
         encoding="utf-8",
     )
+
     t = snapshot["totals"]
-    print(f"Snapshot exportado: {SITE_OUTPUT}")
+    print(f"Snapshot exportado: {output}")
     print(f"  generated_at: {snapshot['generated_at']}")
-    print(f"  totals:       {t['calls']} calls, ${t['cost_usd']:.2f}, "
-          f"{t['providers']} providers, {t['projects']} projects")
+    print(
+        f"  totals:       {t['calls']} calls, ${t['cost_usd']:.2f}, "
+        f"{t['providers']} providers, {t['projects']} projects"
+    )
     print(f"  daily points: {len(snapshot['daily'])}")
     print(f"  top models:   {len(snapshot['by_model'])}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

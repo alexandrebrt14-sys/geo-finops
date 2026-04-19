@@ -1,24 +1,33 @@
-"""Cria a tabela finops_calls no Supabase via REST + verifica conectividade.
+"""Cria a tabela ``finops_calls`` no Supabase via REST + verifica conectividade.
 
 Tenta 3 estrategias em ordem:
-1. POST /rest/v1/rpc/exec_ddl  (se houver function custom)
-2. Inserir linha de teste — se 404 a tabela nao existe, abortar
+
+1. POST ``/rest/v1/rpc/exec_ddl`` (se houver function custom)
+2. Inserir linha de teste — se 404 a tabela nao existe, aborta
 3. Usar PostgREST upsert para validar acesso
 
 Para criar a tabela sem precisar passar pelo dashboard, este script:
+
 - Tenta upsert numa linha de teste
 - Se 404 (tabela inexistente), exibe DDL para o user copiar no SQL editor
-- Imediatamente abre o SQL editor URL no browser via print
+- Imediatamente imprime o URL do SQL editor no terminal
+
+Refatorado em 2026-04-19 para consumir ``geo_finops.config.load_supabase_creds``
+— antes tinha parser de .env inline e path Windows hardcoded.
 """
 
 from __future__ import annotations
 
-import json
-import os
 import sys
 from pathlib import Path
 
 import httpx
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from geo_finops.config import load_supabase_creds  # noqa: E402
 
 DDL = """
 CREATE TABLE IF NOT EXISTS public.finops_calls (
@@ -56,39 +65,32 @@ CREATE POLICY "service_role full access"
 """
 
 
-def _load_creds() -> tuple[str, str]:
-    url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+def _require_creds() -> tuple[str, str]:
+    url, key = load_supabase_creds()
     if not url or not key:
-        env_file = Path("C:/Sandyboxclaude/geo-orchestrator/.env")
-        if env_file.exists():
-            for line in env_file.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line.startswith("SUPABASE_URL="):
-                    url = line.split("=", 1)[1].strip().strip('"').strip("'")
-                elif line.startswith("SUPABASE_KEY="):
-                    key = line.split("=", 1)[1].strip().strip('"').strip("'")
-    if not url or not key:
-        print("FATAL: SUPABASE_URL/SUPABASE_KEY ausentes")
+        print("FATAL: SUPABASE_URL/SUPABASE_KEY ausentes (env ou .env)")
         sys.exit(1)
     return url, key
 
 
 def check_table_exists(url: str, key: str) -> bool:
-    """Tenta GET /rest/v1/finops_calls?limit=0 — 200=exists, 404=missing."""
+    """``GET /rest/v1/finops_calls?limit=0`` — 200 = existe, 404 = falta."""
     headers = {"apikey": key, "Authorization": f"Bearer {key}"}
-    r = httpx.get(f"{url.rstrip('/')}/rest/v1/finops_calls?limit=0", headers=headers, timeout=15)
+    r = httpx.get(
+        f"{url.rstrip('/')}/rest/v1/finops_calls?limit=0",
+        headers=headers,
+        timeout=15,
+    )
     return r.status_code == 200
 
 
 def try_create_via_pg_meta(url: str, key: str) -> bool:
-    """Supabase Studio expoe /pg/query para a service_role em alguns projetos."""
+    """Supabase Studio expoe ``/pg/query`` para service_role em alguns projetos."""
     headers = {
         "apikey": key,
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
-    # Tenta endpoint pg_meta interno (raro estar publicamente exposto)
     candidates = [
         f"{url.rstrip('/')}/pg/query",
         f"{url.rstrip('/')}/database/query",
@@ -104,24 +106,20 @@ def try_create_via_pg_meta(url: str, key: str) -> bool:
     return False
 
 
-def main():
-    url, key = _load_creds()
+def main() -> int:
+    url, key = _require_creds()
     print(f"Supabase URL: {url}")
 
-    # 1) Verifica se ja existe
     if check_table_exists(url, key):
         print("Tabela 'finops_calls' JA EXISTE no Supabase.")
-        return
+        return 0
 
     print("Tabela 'finops_calls' NAO existe. Tentando criar via API...")
 
-    # 2) Tenta criar via pg_meta endpoint (raramente disponivel)
-    if try_create_via_pg_meta(url, key):
-        if check_table_exists(url, key):
-            print("Criada com sucesso via API.")
-            return
+    if try_create_via_pg_meta(url, key) and check_table_exists(url, key):
+        print("Criada com sucesso via API.")
+        return 0
 
-    # 3) Fallback: instrucoes para criar manualmente
     print()
     print("=" * 70)
     print("API direta nao tem permissao DDL. Use o SQL Editor do dashboard:")
@@ -132,8 +130,8 @@ def main():
     print("=" * 70)
     print(DDL)
     print("=" * 70)
-    sys.exit(2)
+    return 2
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

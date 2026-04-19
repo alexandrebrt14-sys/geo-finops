@@ -1,4 +1,4 @@
-"""prices.py — leitura e calculo de custo LLM via prices.yaml.
+"""Leitura e calculo de custo LLM via prices.yaml.
 
 Achado B-020 da auditoria de ecossistema 2026-04-08 (Onda 3 filtrada).
 Antes deste modulo, 4 consumers calculavam custo independentemente
@@ -27,10 +27,10 @@ testes.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +40,13 @@ _PRICES_PATH = Path(__file__).resolve().parent / "prices.yaml"
 def _load_yaml() -> dict:
     """Carrega o YAML. Cached via lru_cache abaixo."""
     try:
-        import yaml  # type: ignore
+        import yaml
     except ImportError:
         # PyYAML eh dep transitiva via alembic, mas se nao estiver
         # disponivel, usamos parser minimo embedded
         return _parse_yaml_minimal(_PRICES_PATH.read_text(encoding="utf-8"))
 
-    with open(_PRICES_PATH, "r", encoding="utf-8") as f:
+    with open(_PRICES_PATH, encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
 
@@ -57,8 +57,8 @@ def _parse_yaml_minimal(text: str) -> dict:
     parser geral. Usado como fallback defensivo.
     """
     result: dict = {"providers": {}, "fallback": {}}
-    current_provider: Optional[str] = None
-    current_model: Optional[str] = None
+    current_provider: str | None = None
+    current_model: str | None = None
     in_fallback = False
     lines = text.split("\n")
 
@@ -87,10 +87,8 @@ def _parse_yaml_minimal(text: str) -> dict:
                 k = k.strip()
                 v = v.strip()
                 if k in ("input_per_1k", "output_per_1k"):
-                    try:
+                    with contextlib.suppress(ValueError):
                         result["fallback"][k] = float(v)
-                    except ValueError:
-                        pass
                 elif k == "notes":
                     result["fallback"]["notes"] = v.strip('"').strip("'")
             continue
@@ -120,14 +118,12 @@ def _parse_yaml_minimal(text: str) -> dict:
                 k = k.strip()
                 v = v.strip()
                 if k in ("input_per_1k", "output_per_1k"):
-                    try:
+                    with contextlib.suppress(ValueError):
                         result["providers"][current_provider]["models"][current_model][k] = float(v)
-                    except ValueError:
-                        pass
                 elif k in ("tier", "notes"):
-                    result["providers"][current_provider]["models"][current_model][k] = (
-                        v.strip('"').strip("'")
-                    )
+                    result["providers"][current_provider]["models"][current_model][k] = v.strip(
+                        '"'
+                    ).strip("'")
 
     return result
 
@@ -181,14 +177,17 @@ def get_price(provider: str, model: str) -> tuple[float, float]:
             if model.startswith(known_model):
                 logger.debug(
                     "prices.yaml: %s/%s matched via prefix %s",
-                    provider, model, known_model,
+                    provider,
+                    model,
+                    known_model,
                 )
                 m = models[known_model]
                 return m.get("input_per_1k", 0.001), m.get("output_per_1k", 0.003)
 
         logger.warning(
             "prices.yaml: model desconhecido '%s' em provider '%s' — usando fallback",
-            model, provider,
+            model,
+            provider,
         )
         fb = data.get("fallback", {})
         return fb.get("input_per_1k", 0.001), fb.get("output_per_1k", 0.003)
@@ -229,7 +228,7 @@ def list_providers() -> list[str]:
     return sorted(data.get("providers", {}).keys())
 
 
-def list_models(provider: Optional[str] = None) -> list[str]:
+def list_models(provider: str | None = None) -> list[str]:
     """Lista modelos. Se provider for None, lista todos os modelos
     de todos os providers."""
     data = _cached_data()

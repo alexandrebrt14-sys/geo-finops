@@ -1,4 +1,4 @@
-"""Worker noturno: sincroniza calls pending para Supabase.
+"""Worker noturno: sincroniza calls pending do SQLite local para o Supabase.
 
 Schema Supabase esperado (criar via dashboard ou migration SQL):
 
@@ -21,9 +21,15 @@ Schema Supabase esperado (criar via dashboard ou migration SQL):
     );
 
 Uso:
+
     python -m geo_finops.sync                    # roda sync
     python -m geo_finops.sync --dry-run          # so mostra o que faria
     python -m geo_finops.sync --batch-size 200   # custom batch size
+
+Credenciais sao resolvidas via ``geo_finops.config.load_supabase_creds``.
+Os aliases ``_load_supabase_creds``, ``_candidate_env_files``,
+``_parse_env_file`` permanecem como re-exports para preservar
+compatibilidade com os testes existentes (``tests/test_sync_creds.py``).
 """
 
 from __future__ import annotations
@@ -31,121 +37,40 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
-import sys
+import time
 from datetime import datetime, timezone
-from typing import Any
 
 import httpx
 
+from .config import (
+    candidate_env_files as _candidate_env_files,
+)
+from .config import (
+    load_supabase_creds as _load_supabase_creds,
+)
+from .config import (
+    parse_env_file as _parse_env_file,
+)
 from .db import get_connection, init_db
 
 logger = logging.getLogger(__name__)
 
-
-def _candidate_env_files() -> list:
-    """Lista ordenada de candidatos a arquivo .env para carregar credenciais.
-
-    Ordem (primeira fonte com ambos url+key vence):
-    1. GEO_FINOPS_ENV_FILE (override explicito por env var)
-    2. $XDG_CONFIG_HOME/geo-finops/.env
-    3. ~/.config/geo-finops/.env (XDG default Linux/Mac)
-    4. ~/.geo-finops.env (home dotfile)
-    5. <parent_dir>/geo-orchestrator/.env (sibling repo se layout canonico)
-
-    Esta lista eh portavel: nenhum path absoluto Windows hardcoded. Funciona
-    em Linux, macOS e Windows desde que pelo menos uma fonte exista.
-    """
-    from pathlib import Path
-
-    candidates: list = []
-
-    explicit = os.environ.get("GEO_FINOPS_ENV_FILE")
-    if explicit:
-        candidates.append(Path(explicit))
-
-    xdg_config = os.environ.get("XDG_CONFIG_HOME")
-    if xdg_config:
-        candidates.append(Path(xdg_config) / "geo-finops" / ".env")
-
-    candidates.append(Path.home() / ".config" / "geo-finops" / ".env")
-    candidates.append(Path.home() / ".geo-finops.env")
-    candidates.append(Path(__file__).resolve().parents[2] / "geo-orchestrator" / ".env")
-
-    return candidates
+__all__ = [
+    # Re-exports para compat com tests/test_sync_creds.py
+    "_candidate_env_files",
+    "_load_supabase_creds",
+    "_parse_env_file",
+    "fetch_pending",
+    "mark_error",
+    "mark_synced",
+    "push_batch",
+    "sync",
+]
 
 
-def _parse_env_file(path) -> dict:
-    """Le um arquivo .env e retorna dict de variaveis.
-
-    Ignora comentarios (#) e linhas malformadas. Strippa aspas simples e
-    duplas dos valores. Trata erros de IO/encoding silenciosamente
-    (loga warning e retorna o que conseguiu parsear).
-    """
-    result: dict = {}
-    try:
-        if not path.exists():
-            return result
-    except OSError:
-        return result
-
-    try:
-        content = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        logger.warning("nao foi possivel ler %s: %s", path, exc)
-        return result
-
-    for line in content.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        result[key.strip()] = value.strip().strip('"').strip("'")
-    return result
-
-
-def _load_supabase_creds() -> tuple[str | None, str | None]:
-    """Le SUPABASE_URL e SUPABASE_KEY com busca dinamica em multiplas fontes.
-
-    Ordem de prioridade (primeira fonte que tem ambos vence):
-    1. Env vars: SUPABASE_URL + (SUPABASE_KEY ou SUPABASE_SERVICE_ROLE_KEY)
-    2. Override: GEO_FINOPS_ENV_FILE -> .env
-    3. XDG basedir: $XDG_CONFIG_HOME/geo-finops/.env
-    4. XDG default: ~/.config/geo-finops/.env
-    5. Home dotfile: ~/.geo-finops.env
-    6. Sibling: <parent>/geo-orchestrator/.env
-
-    Refatorado em 2026-04-09 (achado F11 da auditoria 2026-04-08) para
-    eliminar path Windows hardcoded e funcionar em qualquer host.
-
-    Returns:
-        Tupla (url, key). Cada valor pode ser None se nao encontrado em
-        nenhuma fonte.
-    """
-    url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-    if url and key:
-        logger.debug("supabase creds: env vars")
-        return url, key
-
-    for env_file in _candidate_env_files():
-        parsed = _parse_env_file(env_file)
-        if not parsed:
-            continue
-        candidate_url = parsed.get("SUPABASE_URL") or url
-        candidate_key = (
-            parsed.get("SUPABASE_KEY")
-            or parsed.get("SUPABASE_SERVICE_ROLE_KEY")
-            or key
-        )
-        if candidate_url and candidate_key:
-            logger.debug("supabase creds: %s", env_file)
-            return candidate_url, candidate_key
-        # Atualiza parciais para o caso de fontes complementares
-        url = candidate_url
-        key = candidate_key
-
-    return url, key
+# ---------------------------------------------------------------------------
+# Acesso ao SQLite local (pending/synced/error)
+# ---------------------------------------------------------------------------
 
 
 def fetch_pending(limit: int) -> list[dict]:
@@ -189,11 +114,16 @@ def mark_error(ids: list[int]) -> None:
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Transformacao e push
+# ---------------------------------------------------------------------------
+
+
 def _row_to_payload(row: dict) -> dict:
-    """Converte uma linha do SQLite local para payload do Supabase.
+    """Converte uma linha SQLite em payload PostgREST.
 
     PostgREST exige TODAS as linhas do batch com as MESMAS chaves — por isso
-    sempre incluimos metadata (mesmo None) no payload.
+    sempre incluimos ``metadata`` (mesmo ``None``) no payload.
     """
     metadata = None
     raw_meta = row.get("metadata")
@@ -218,16 +148,25 @@ def _row_to_payload(row: dict) -> dict:
     }
 
 
+# Status codes 4xx fatais (nao compensa retry) e transitorios tratados especialmente.
+_FATAL_STATUS = frozenset({401, 403, 422})
+_SUCCESS_STATUS = frozenset({200, 201, 204})
+
+
 def push_batch(rows: list[dict], url: str, key: str, max_retries: int = 3) -> tuple[int, int]:
-    """POST batch para Supabase REST API com retry exponencial. Retorna (success_count, error_count).
+    """POST batch para Supabase REST API com retry exponencial.
 
-    Usa Prefer: resolution=ignore-duplicates que funciona com qualquer constraint
-    UNIQUE existente (incluindo expressional). Linhas ja sincronizadas sao
-    silenciosamente ignoradas pelo Postgres via ON CONFLICT DO NOTHING.
+    Usa ``Prefer: resolution=ignore-duplicates`` — funciona com qualquer
+    constraint UNIQUE existente (incluindo expressional). Linhas ja
+    sincronizadas sao silenciosamente ignoradas pelo Postgres via
+    ``ON CONFLICT DO NOTHING``.
 
-    Retry com backoff exponencial em 4xx (exceto 401/403/422) e 5xx + erros de rede.
+    Retry com backoff exponencial em 4xx (exceto 401/403/422) e 5xx +
+    erros de rede.
+
+    Returns:
+        Tupla ``(success_count, error_count)``.
     """
-    import time
     if not rows:
         return 0, 0
     headers = {
@@ -244,7 +183,7 @@ def push_batch(rows: list[dict], url: str, key: str, max_retries: int = 3) -> tu
         try:
             with httpx.Client(timeout=60) as c:
                 r = c.post(endpoint, headers=headers, json=payload)
-            if r.status_code in (200, 201, 204):
+            if r.status_code in _SUCCESS_STATUS:
                 return len(rows), 0
             # 409 Conflict = todas as rows do batch ja existem (dedup do Postgres).
             # Eh um sucesso silencioso: idempotencia funcionando, marcar como synced.
@@ -252,7 +191,7 @@ def push_batch(rows: list[dict], url: str, key: str, max_retries: int = 3) -> tu
                 logger.debug("Supabase 409 (todas duplicatas, dedup OK): %d rows", len(rows))
                 return len(rows), 0
             # 4xx fatais (auth/permissoes/validacao) — nao adianta retry
-            if r.status_code in (401, 403, 422):
+            if r.status_code in _FATAL_STATUS:
                 logger.error("Supabase HTTP %d (fatal): %s", r.status_code, r.text[:300])
                 return 0, len(rows)
             # 5xx ou 4xx transitorio — retry com backoff
@@ -263,15 +202,25 @@ def push_batch(rows: list[dict], url: str, key: str, max_retries: int = 3) -> tu
             logger.warning("Supabase rede, retry %d/%d: %s", attempt + 1, max_retries, exc)
 
         if attempt < max_retries:
-            backoff = (2 ** attempt) + (attempt * 0.5)
+            backoff = (2**attempt) + (attempt * 0.5)
             time.sleep(backoff)
 
     logger.error("Supabase batch falhou apos %d retries: %s", max_retries, last_error)
     return 0, len(rows)
 
 
+# ---------------------------------------------------------------------------
+# Orquestracao
+# ---------------------------------------------------------------------------
+
+# Limite de seguranca para evitar loop infinito caso haja bug na marcacao de
+# status. 50 iteracoes * 500 batch = 25k linhas por run, suficiente para
+# qualquer backlog realista.
+_SAFETY_ITERATION_LIMIT = 50
+
+
 def sync(batch_size: int = 500, dry_run: bool = False) -> dict:
-    """Roda sync ate esgotar pending ou bater limite de seguranca."""
+    """Roda sync ate esgotar pending ou bater o limite de seguranca."""
     init_db()
     url, key = _load_supabase_creds()
     if not url or not key:
@@ -279,10 +228,9 @@ def sync(batch_size: int = 500, dry_run: bool = False) -> dict:
 
     total_synced = 0
     total_error = 0
-    safety_limit = 50  # max iteracoes (= 25k linhas se batch=500)
     iterations = 0
 
-    while iterations < safety_limit:
+    while iterations < _SAFETY_ITERATION_LIMIT:
         rows = fetch_pending(batch_size)
         if not rows:
             break
@@ -291,7 +239,7 @@ def sync(batch_size: int = 500, dry_run: bool = False) -> dict:
         if dry_run:
             print(f"[DRY] iteracao {iterations}: {len(rows)} linhas pending")
             total_synced += len(rows)
-            break  # nao loop em dry-run
+            break
         ok, err = push_batch(rows, url, key)
         if ok > 0:
             mark_synced(ids[:ok])
@@ -299,7 +247,7 @@ def sync(batch_size: int = 500, dry_run: bool = False) -> dict:
         if err > 0:
             mark_error(ids[ok:])
             total_error += err
-            break  # para se houve erro
+            break
 
     return {
         "status": "ok",
@@ -310,7 +258,12 @@ def sync(batch_size: int = 500, dry_run: bool = False) -> dict:
     }
 
 
-def main():
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch-size", type=int, default=500)
     parser.add_argument("--dry-run", action="store_true")

@@ -1,36 +1,21 @@
-"""Banco SQLite local centralizado em ~/.config/geo-finops/calls.db.
+"""Banco SQLite local centralizado em ``~/.config/geo-finops/calls.db``.
 
 Schema unico, indexes para queries rapidas, dedup garantido por
-(timestamp, project, run_id, model_id) — UNIQUE constraint.
+``(timestamp, project, run_id, model_id)`` — UNIQUE constraint.
+
+A resolucao do path agora vive em ``geo_finops.config.get_db_path`` para
+permitir override consistente via ``GEO_FINOPS_DB_PATH`` ou
+``GEO_FINOPS_CONFIG_DIR`` em todo o pacote.
 """
 
 from __future__ import annotations
 
-import os
 import sqlite3
-from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Localizacao do banco
-# ---------------------------------------------------------------------------
+from .config import get_db_path
 
-def get_db_path() -> Path:
-    """Retorna o caminho absoluto do calls.db (cria diretorio se nao existe).
+__all__ = ["SCHEMA", "get_connection", "get_db_path", "init_db"]
 
-    Override via env: GEO_FINOPS_DB_PATH
-    """
-    custom = os.environ.get("GEO_FINOPS_DB_PATH")
-    if custom:
-        p = Path(os.path.expanduser(custom))
-    else:
-        p = Path.home() / ".config" / "geo-finops" / "calls.db"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    return p
-
-
-# ---------------------------------------------------------------------------
-# Schema
-# ---------------------------------------------------------------------------
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS llm_calls (
@@ -72,8 +57,14 @@ CREATE TABLE IF NOT EXISTS migrations (
 
 
 def get_connection() -> sqlite3.Connection:
-    """Retorna conexao SQLite com WAL mode (concorrencia leitura/escrita)."""
+    """Retorna conexao SQLite com WAL mode (concorrencia leitura/escrita).
+
+    Autocommit (``isolation_level=None``) porque os callers gerenciam
+    transacoes via PRAGMA/INSERT direto. ``busy_timeout=10000`` (10s)
+    tolera sync worker + CLI ativos simultaneamente.
+    """
     db_path = get_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), timeout=30.0, isolation_level=None)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")

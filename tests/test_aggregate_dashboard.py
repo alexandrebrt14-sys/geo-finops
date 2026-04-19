@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -14,7 +13,6 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import aggregate_dashboard as agg  # noqa: E402
 
-
 # ─── Aggregations ─────────────────────────────────────────────────────────
 
 
@@ -24,9 +22,27 @@ def test_aggregate_by_project_empty():
 
 def test_aggregate_by_project_basic():
     calls = [
-        {"project": "papers", "cost_usd": 0.05, "tokens_in": 100, "tokens_out": 200, "model_id": "gpt-4o"},
-        {"project": "papers", "cost_usd": 0.03, "tokens_in": 50, "tokens_out": 100, "model_id": "gpt-4o"},
-        {"project": "curso", "cost_usd": 0.02, "tokens_in": 30, "tokens_out": 60, "model_id": "claude-haiku-4-5"},
+        {
+            "project": "papers",
+            "cost_usd": 0.05,
+            "tokens_in": 100,
+            "tokens_out": 200,
+            "model_id": "gpt-4o",
+        },
+        {
+            "project": "papers",
+            "cost_usd": 0.03,
+            "tokens_in": 50,
+            "tokens_out": 100,
+            "model_id": "gpt-4o",
+        },
+        {
+            "project": "curso",
+            "cost_usd": 0.02,
+            "tokens_in": 30,
+            "tokens_out": 60,
+            "model_id": "claude-haiku-4-5",
+        },
     ]
     result = agg._aggregate_by_project(calls)
     assert "papers" in result
@@ -91,11 +107,21 @@ def test_daily_timeseries_sorted():
 
 def test_render_dashboard_returns_html(monkeypatch):
     """render_dashboard retorna HTML valido sem precisar de DB real."""
-    monkeypatch.setattr(agg, "_load_geo_finops_calls", lambda since_days: [
-        {"project": "papers", "provider": "openai", "cost_usd": 0.05,
-         "tokens_in": 100, "tokens_out": 200, "model_id": "gpt-4o",
-         "timestamp": "2026-04-09T10:00:00Z"},
-    ])
+    monkeypatch.setattr(
+        agg,
+        "_load_geo_finops_calls",
+        lambda since_days: [
+            {
+                "project": "papers",
+                "provider": "openai",
+                "cost_usd": 0.05,
+                "tokens_in": 100,
+                "tokens_out": 200,
+                "model_id": "gpt-4o",
+                "timestamp": "2026-04-09T10:00:00Z",
+            },
+        ],
+    )
     monkeypatch.setattr(agg, "_try_caramaschi_finops", lambda: None)
     monkeypatch.setattr(agg, "_load_orchestrator_kpis", lambda since_days: [])
 
@@ -120,10 +146,14 @@ def test_render_dashboard_empty_data(monkeypatch):
 def test_render_dashboard_with_caramaschi(monkeypatch):
     """Quando caramaschi /finops responde, snapshot vai pro HTML."""
     monkeypatch.setattr(agg, "_load_geo_finops_calls", lambda since_days: [])
-    monkeypatch.setattr(agg, "_try_caramaschi_finops", lambda: {
-        "spent_today": 0.5,
-        "calls_today": 12,
-    })
+    monkeypatch.setattr(
+        agg,
+        "_try_caramaschi_finops",
+        lambda: {
+            "spent_today": 0.5,
+            "calls_today": 12,
+        },
+    )
     monkeypatch.setattr(agg, "_load_orchestrator_kpis", lambda since_days: [])
 
     html = agg.render_dashboard(since_days=7)
@@ -143,13 +173,12 @@ def test_render_dashboard_includes_chart_js(monkeypatch):
 def test_render_dashboard_no_emojis(monkeypatch):
     """Sentinela contra regra global: zero emojis."""
     import re
+
     monkeypatch.setattr(agg, "_load_geo_finops_calls", lambda since_days: [])
     monkeypatch.setattr(agg, "_try_caramaschi_finops", lambda: None)
     monkeypatch.setattr(agg, "_load_orchestrator_kpis", lambda since_days: [])
     html = agg.render_dashboard(since_days=7)
-    emoji_pattern = re.compile(
-        r"[\U0001F300-\U0001F9FF\U00002600-\U000027BF\U0001F600-\U0001F64F]"
-    )
+    emoji_pattern = re.compile(r"[\U0001F300-\U0001F9FF\U00002600-\U000027BF\U0001F600-\U0001F64F]")
     emojis_found = emoji_pattern.findall(html)
     assert len(emojis_found) == 0, f"Emojis encontrados: {emojis_found}"
 

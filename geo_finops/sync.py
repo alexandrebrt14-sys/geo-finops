@@ -93,7 +93,7 @@ def mark_synced(ids: list[int]) -> None:
     try:
         placeholders = ",".join("?" * len(ids))
         conn.execute(
-            f"UPDATE llm_calls SET sync_status='synced', synced_at=? WHERE id IN ({placeholders})",
+            f"UPDATE llm_calls SET sync_status='synced', synced_at=? WHERE id IN ({placeholders})",  # nosec B608 — placeholders é só sequência de ?
             [now, *ids],
         )
     finally:
@@ -107,7 +107,7 @@ def mark_error(ids: list[int]) -> None:
     try:
         placeholders = ",".join("?" * len(ids))
         conn.execute(
-            f"UPDATE llm_calls SET sync_status='error' WHERE id IN ({placeholders})",
+            f"UPDATE llm_calls SET sync_status='error' WHERE id IN ({placeholders})",  # nosec B608 — placeholders é só sequência de ?
             ids,
         )
     finally:

@@ -75,7 +75,7 @@ def totals(
     params: list = []
     where = _where_time(start, end, params)
     sql = (
-        "SELECT COUNT(*) AS calls,"
+        "SELECT COUNT(*) AS calls,"  # nosec B608 — where vem de _where_time (parametrizado com ?)
         "       COALESCE(SUM(cost_usd), 0) AS cost_usd,"
         "       COALESCE(SUM(tokens_in), 0) AS tokens_in,"
         "       COALESCE(SUM(tokens_out), 0) AS tokens_out,"
@@ -132,7 +132,7 @@ def aggregate_by(
     params: list = []
     where = _where_time(start, end, params)
     sql = (
-        f"SELECT {field} AS key,"
+        f"SELECT {field} AS key,"  # nosec B608 — field validado contra _VALID_GROUP_FIELDS; where parametrizado
         "       COUNT(*) AS calls,"
         "       COALESCE(SUM(tokens_in), 0) AS tokens_in,"
         "       COALESCE(SUM(tokens_out), 0) AS tokens_out,"
@@ -165,7 +165,7 @@ def top_models(
     params: list = []
     where = _where_time(start, end, params)
     sql = (
-        "SELECT model_id AS key, provider,"
+        "SELECT model_id AS key, provider,"  # nosec B608 — where vem de _where_time (parametrizado com ?)
         "       COUNT(*) AS calls,"
         "       COALESCE(SUM(tokens_in), 0) AS tokens_in,"
         "       COALESCE(SUM(tokens_out), 0) AS tokens_out,"
@@ -231,7 +231,7 @@ def top_hotspots(
     params: list = []
     where = _where_time(start, end, params)
     sql = (
-        "SELECT project, model_id,"
+        "SELECT project, model_id,"  # nosec B608 — where vem de _where_time (parametrizado com ?)
         "       COALESCE(task_type, '?') AS task_type,"
         "       COUNT(*) AS calls,"
         "       ROUND(SUM(cost_usd), 4) AS cost_usd"

@@ -3,21 +3,18 @@
 ![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)
 ![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-production-green.svg)
-![Tests](https://img.shields.io/badge/tests-149%20passing-success.svg)
-![Coverage](https://img.shields.io/badge/coverage-54%25-yellow.svg)
-![Health](https://img.shields.io/badge/health-13%2F13-success.svg)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
 
 **Tracking centralizado de uso de LLMs para todos os projetos do ecossistema Brasil GEO.**
 
-Substitui 4 sistemas de tracking paralelos por um único SQLite local com sincronização diária para Supabase. Resolveu o problema das **505 calls órfãs** detectadas via OpenAI admin API que não eram rastreadas por nenhum dos sistemas anteriores.
+Substitui 4 sistemas de tracking paralelos por um único SQLite local com sincronização diária para Supabase. Resolveu o problema de calls órfãs detectadas via OpenAI admin API que não eram rastreadas por nenhum dos sistemas anteriores.
 
-**Estado atual** (validado por health check 13/13):
+**Estado atual** (validado por health check em 13 dimensões — dados atualizados em 2026-05-04):
 
-- 1.474 calls / $255,45 / 5 providers / 5 projetos
+- Múltiplos providers e projetos do ecossistema rastreados em base única
 - Pipeline ponta-a-ponta operacional (SQLite local → Supabase → snapshot → endpoint live)
-- 149 testes / 54% de cobertura
-- 4 callers órfãos instrumentados
+- Suíte de testes ampla rodando em <10s sem dependências externas
+- Callers órfãos instrumentados
 - Task Scheduler diário 23:50 ativo
 - Re-sync idempotente validado (HTTP 409 tratado como sucesso)
 - Live em <https://alexandrecaramaschi.com/finops>
@@ -97,7 +94,7 @@ scripts/
 ├── weekly_digest.py      # CLI thin do pacote digest/
 └── bootstrap_supabase.py # criacao inicial da tabela
 
-tests/                    # 149 testes
+tests/                    # suíte de testes
 ├── conftest.py
 ├── test_config.py        (20)
 ├── test_tracker.py       (28)
@@ -202,7 +199,7 @@ geo-finops-sync
 ### Scripts (operação)
 
 ```bash
-# Health check 13/13
+# Health check (13 dimensões)
 python scripts/health_check.py
 
 # Gerar snapshot para landing-page-geo
@@ -315,7 +312,7 @@ pre-commit install
 pre-commit run --all-files
 ```
 
-Todos os 149 testes rodam em <10s localmente sem depender de Supabase/WhatsApp reais.
+Todos os testes rodam em <10s localmente sem depender de Supabase/WhatsApp reais.
 
 ---
 
@@ -400,13 +397,7 @@ Cada projeto tem um adapter thin que importa `geo_finops.track_call` via `sys.pa
 
 ## Migração inicial (executada em 2026-04-07)
 
-| Projeto | Calls | Custo | Fonte |
-|---|---:|---:|---|
-| geo-orchestrator | 1.189 | $254,17 | `output/execution_*.json` × 131 |
-| papers | 257 | $0,14 | `data/papers.db::finops_usage` |
-| curso-factory | 21 | $1,12 | `output/costs.json` |
-| caramaschi | 0 | $0 | (sem tracker estruturado) |
-| **Total** | **1.467** | **$255,43** | |
+Os históricos dos 4 projetos do ecossistema (geo-orchestrator, papers, curso-factory, caramaschi) foram consolidados na base única a partir das respectivas fontes legadas (`output/execution_*.json`, `data/papers.db::finops_usage`, `output/costs.json`). Métricas detalhadas de volume e custo são internas e ficam fora deste repositório público.
 
 O bug de dedup colapsando tasks com mesmo timestamp foi corrigido incluindo `task_id` no `run_id` sintético.
 

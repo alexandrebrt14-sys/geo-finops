@@ -24,3 +24,8 @@ logs/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Segredos e credenciais locais — nunca commitar em repo público
+.env
+.env.*
+!.env.example

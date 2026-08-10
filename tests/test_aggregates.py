@@ -13,6 +13,7 @@ Cobre:
 from __future__ import annotations
 
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -182,8 +183,23 @@ def test_top_models_limit(isolated_db):
 
 
 def test_daily_timeseries_groups_by_date(isolated_db):
+    # CORRECAO 2026-08-09: este teste tinha prazo de validade embutido. Ele
+    # semeava chamadas com timestamp fixo em 2026-04-01/02 e consultava uma
+    # janela fixa de 30 dias a partir de HOJE. Passou enquanto "hoje" esteve
+    # dentro da janela e comecou a falhar quando o calendario andou: em
+    # 09/08/2026 a distancia ja era de 130 dias, `daily_timeseries(days=30)`
+    # devolvia lista vazia e a asercao quebrava com `'2026-04-01' in []`.
+    #
+    # O defeito era do teste, nao do agregador: nada em `daily_timeseries`
+    # mudou. A janela agora e derivada da propria semente, entao a asercao
+    # volta a medir o que o nome promete (agrupar por data e devolver em ordem
+    # crescente) e para de apodrecer sozinha.
     _seed(isolated_db)
-    rows = aggregates.daily_timeseries(days=30)
+    primeira_semente = date(2026, 4, 1)
+    janela_dias = (date.today() - primeira_semente).days + 1
+    assert janela_dias > 0, "semente no futuro: revise as datas de _seed"
+
+    rows = aggregates.daily_timeseries(days=janela_dias)
     dates = [r["date"] for r in rows]
     assert "2026-04-01" in dates
     assert "2026-04-02" in dates

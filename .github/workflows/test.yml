@@ -1,0 +1,79 @@
+name: tests
+
+# Criado em 2026-08-09. Ate esta data o repositorio nunca rodou teste no CI:
+# `gh run list --limit 40` devolvia 18 execucoes em toda a vida do repo, TODAS
+# do Security scan (Python). Os 9 arquivos tests/test_*.py existiam e nunca
+# tinham sido executados por um servidor.
+#
+# O sintoma disso ja estava anotado e ignorado: o corpo do PR #5 (08/07/2026)
+# registrava a falha de test_daily_timeseries_groups_by_date, que seguiu
+# quebrada por um mes. Era um teste com prazo de validade embutido (janela fixa
+# de 30 dias contra data semeada fixa em abril), corrigido no mesmo commit que
+# criou este arquivo.
+#
+# Medido nesta arvore antes de ligar o gate: 149 passed em 4,26s.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest
+
+      - name: Run pytest
+        run: pytest --tb=short -q
+
+      - name: Sentinela de bateria (>= 149 testes)
+        # Teste apagado e regressao silenciosa, e a contagem e a unica coisa
+        # que a suite nao consegue esconder.
+        run: |
+          python - <<'EOF'
+          import re
+          import subprocess
+
+          out = subprocess.run(
+              ["pytest", "--collect-only", "-q"],
+              capture_output=True,
+              text=True,
+              check=False,
+          ).stdout
+          match = re.search(r"(\d+) tests? collected", out)
+          assert match, f"nao consegui ler a contagem de testes:\n{out[-500:]}"
+          total = int(match.group(1))
+          assert total >= 149, f"FAIL: bateria encolheu para {total} testes (minimo 149)"
+          print(f"OK: {total} testes coletados (minimo 149)")
+          EOF

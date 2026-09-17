@@ -152,5 +152,69 @@ def build_digest(weeks_back: int = 0) -> dict:
             "delta_pct": _delta_pct(total_curr, total_prev),
         },
         "alerts": _build_alerts(curr["cost_usd"], prev["cost_usd"]),
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        **_carimbo_de_validade(),
     }
+
+
+# Quanto tempo um digest continua servindo como resposta honesta. O pipeline que
+# alimenta este pacote e diario, entao 48 horas cobre um dia perdido sem alarme
+# falso e acusa o segundo.
+VALIDADE_HORAS = 48
+
+
+def _carimbo_de_validade() -> dict:
+    """Carimba o digest com o momento da geracao E o prazo de validade dele.
+
+    ACRESCENTADO em 2026-08-09. O payload trazia so `generated_at`, que no
+    momento da geracao e sempre "agora" e por isso nunca denuncia nada. Quem
+    consome ficava com duas opcoes ruins: confiar cegamente, ou inventar um
+    limiar proprio de obsolescencia e mante-lo em sincronia com a cadencia do
+    produtor, que ele nao conhece.
+
+    O custo disso foi medido: o endpoint publico /api/finops/llm-usage serviu
+    `generated_at: 2026-04-19` por 112 dias, com cara de numero atual, enquanto
+    a decisao de gasto do ecossistema dependia dele.
+
+    Agora o produtor declara a propria validade. Qualquer consumidor compara o
+    relogio dele com `stale_after` e sabe, sem precisar saber a cadencia de
+    ninguem. `valid_for_hours` vai junto para o consumidor poder explicar ao
+    usuario o porque, em vez de so mostrar um selo.
+    """
+    agora = datetime.now(timezone.utc)
+    return {
+        "generated_at": agora.isoformat(),
+        "valid_for_hours": VALIDADE_HORAS,
+        "stale_after": (agora + timedelta(hours=VALIDADE_HORAS)).isoformat(),
+    }
+
+
+def digest_esta_obsoleto(digest: dict, agora: datetime | None = None) -> bool:
+    """Diz se um digest ja passou da validade que ele mesmo declarou.
+
+    Digest antigo, gerado antes deste carimbo existir, nao tem `stale_after`.
+    Nesse caso cai no `generated_at` mais a validade padrao; e sem nenhum dos
+    dois o digest e tratado como OBSOLETO, porque um payload que nao sabe dizer
+    quando nasceu nao pode ser apresentado como medicao corrente.
+    """
+    agora = agora or datetime.now(timezone.utc)
+
+    limite = digest.get("stale_after")
+    if not limite:
+        nascimento = digest.get("generated_at")
+        if not nascimento:
+            return True
+        try:
+            limite = (
+                datetime.fromisoformat(nascimento) + timedelta(hours=VALIDADE_HORAS)
+            ).isoformat()
+        except (TypeError, ValueError):
+            return True
+
+    try:
+        prazo = datetime.fromisoformat(limite)
+    except (TypeError, ValueError):
+        return True
+
+    if prazo.tzinfo is None:
+        prazo = prazo.replace(tzinfo=timezone.utc)
+    return agora > prazo

@@ -29,6 +29,13 @@
 ### B-025: security-scan workflow
 - bandit + pip-audit + gitleaks semanalmente
 
+## Estado em 30/09/2026
+
+- CI de teste ligado desde 09/08/2026 (PR #8): `test.yml` roda pytest em Python 3.11 e 3.12 com sentinela de no mínimo 155 testes; a suíte tem 155.
+- Digest com validade declarada desde 10/08/2026: `valid_for_hours` (48) e `stale_after` no payload (`geo_finops/digest/builders.py`, testes em `tests/test_validade_digest.py`).
+- `prices.yaml` segue na versão de 2026-04-09 (Claude 4.6, GPT-4o, Gemini 2.5, Sonar, Groq Llama) e não cobre o parque atual do geo-orchestrator (v5.2, sem Groq desde 22/09/2026). Atualizar é mudança de dado, fora do escopo de documentação.
+- Consumidores ativos: `papers` e `caramaschi`. O adaptador do geo-orchestrator saiu na refatoração 5.1 dele (08/09/2026).
+
 ## Propósito
 
 Tracking centralizado de uso de LLMs em todos os projetos do ecossistema Brasil GEO. SQLite local em `~/.config/geo-finops/calls.db` + sync diário Supabase. Substituiu 4 trackers paralelos. 1467 calls migradas historicamente.
@@ -92,8 +99,7 @@ Cada projeto consumidor importa `geo_finops` via thin adapter (`unified_finops.p
 
 ## Próximos passos planejados
 
-- B-014 (Onda 2): Alembic para schema migrations
-- B-020 (Onda 3): centralizar cálculo de custo aqui (deixar de ser responsabilidade dos consumers) com `prices.yaml` versionado
+- B-014 (Alembic) e B-020 (`prices.yaml`) foram entregues em abril de 2026; o que falta em B-020 é manter a tabela em dia com o parque vigente.
 
 ## API keys
 

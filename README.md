@@ -9,15 +9,13 @@
 
 Substitui 4 sistemas de tracking paralelos por um único SQLite local com sincronização diária para Supabase. Resolveu o problema de calls órfãs detectadas via OpenAI admin API que não eram rastreadas por nenhum dos sistemas anteriores.
 
-**Estado atual** (validado por health check em 13 dimensões — dados atualizados em 2026-05-04):
+**Estado atual** (conferido em 30/09/2026 contra o código da `main`):
 
-- Múltiplos providers e projetos do ecossistema rastreados em base única
-- Pipeline ponta-a-ponta operacional (SQLite local → Supabase → snapshot → endpoint live)
-- Suíte de testes ampla rodando em <10s sem dependências externas
-- Callers órfãos instrumentados
-- Task Scheduler diário 23:50 ativo
-- Re-sync idempotente validado (HTTP 409 tratado como sucesso)
-- Live em <https://alexandrecaramaschi.com/finops>
+- Pipeline ponta a ponta: SQLite local, sync diário para o Supabase, snapshot e endpoint público em <https://alexandrecaramaschi.com/finops>.
+- Bateria de 155 testes, que roda em cerca de 8 s sem Supabase nem WhatsApp reais. Até 09/08/2026 ela nunca tinha rodado em servidor: o PR #8 criou o `test.yml`, com Python 3.11 e 3.12 e uma sentinela que reprova o CI se a coleta cair abaixo de 155 testes.
+- O digest declara a própria validade desde 10/08/2026: o payload sai com `valid_for_hours` (48) e `stale_after` ao lado do `generated_at`, porque o endpoint público chegou a servir por 112 dias um retrato de abril com cara de número atual.
+- Re-sync idempotente (HTTP 409 tratado como sucesso) e Task Scheduler diário às 23:50 no Windows.
+- Consumidor instrumentado hoje: `papers` (`src/finops/unified_adapter.py`) e `caramaschi` (`src/scripts/caramaschi_finops.py`). O adaptador do `geo-orchestrator` foi removido como código morto na refatoração 5.1 daquele repositório, em 08/09/2026, e o orquestrador passou a manter o próprio FinOps em `output/.finops/`.
 
 > **Documentação adicional:**
 >
@@ -79,7 +77,7 @@ geo_finops/
 ├── migrate.py            # migra 4 trackers legados
 ├── cli.py                # status/summary/list/migrate/sync
 ├── prices.py             # calculo de custo (prices.yaml)
-├── prices.yaml           # 5 providers, 11 modelos
+├── prices.yaml           # 5 providers, 11 modelos (versão 2026-04-09, defasada; ver abaixo)
 ├── digest/               # weekly FinOps digest
 │   ├── cloud.py          # Fly + Vercel + GH Actions estimators
 │   ├── builders.py       # build_digest + week_window
@@ -94,17 +92,20 @@ scripts/
 ├── weekly_digest.py      # CLI thin do pacote digest/
 └── bootstrap_supabase.py # criacao inicial da tabela
 
-tests/                    # suíte de testes
+tests/                    # 155 testes coletados em 30/09/2026
 ├── conftest.py
-├── test_config.py        (20)
-├── test_tracker.py       (28)
-├── test_aggregates.py    (14)
+├── test_config.py        (22)
+├── test_tracker.py       (40)
+├── test_aggregates.py    (15)
 ├── test_digest.py        (15)
+├── test_validade_digest.py (6)
 ├── test_sync_creds.py    (14)
 ├── test_prices.py        (21)
 ├── test_alembic_baseline.py (10)
 └── test_aggregate_dashboard.py (12)
 ```
+
+A tabela de preços em `geo_finops/prices.yaml` ainda descreve o parque de abril de 2026 (Claude 4.6, GPT-4o, Gemini 2.5, Sonar Pro e Groq Llama). O parque vigente do `geo-orchestrator`, desde a Sprint 32 de 25/09/2026, tem 16 modelos em cinco provedores (Anthropic, OpenAI, Google, Perplexity e xAI) e não usa mais o Groq. O `track_call` grava o `cost_usd` que o chamador informa e não depende da tabela; quem usa `calculate_cost` com um modelo atual cai no preço de fallback de `get_price` (US$ 0,001 de entrada e US$ 0,003 de saída por mil tokens), que não corresponde a nenhum modelo do parque.
 
 ---
 
@@ -312,7 +313,13 @@ pre-commit install
 pre-commit run --all-files
 ```
 
-Todos os testes rodam em <10s localmente sem depender de Supabase/WhatsApp reais.
+Os 155 testes rodam em cerca de 8 s localmente, sem depender de Supabase nem de WhatsApp reais.
+
+### CI
+
+- `.github/workflows/test.yml`: pytest em Python 3.11 e 3.12 em todo push e PR, mais a sentinela de contagem (mínimo de 155 testes coletados).
+- `.github/workflows/security-scan.yml`: bandit, pip-audit e gitleaks, com `pull-requests: read` para o gitleaks não morrer em 403.
+- Hook local: `.githooks/pre-commit` roda o `secret_guard` (`.tools/secret_guard.py`) e só vale com `git config core.hooksPath .githooks`; o `.pre-commit-config.yaml` é a alternativa pelo framework `pre-commit`.
 
 ---
 
@@ -386,12 +393,12 @@ git commit -m "chore(finops): refresh snapshot [skip build]" && git push
 
 Cada projeto tem um adapter thin que importa `geo_finops.track_call` via `sys.path`. **No-op se `geo_finops` não disponível** (compatibilidade total — tracking jamais quebra a call principal).
 
-| Projeto | Adapter |
-|---|---|
-| geo-orchestrator | `src/unified_finops.py` |
-| papers | `src/finops/unified_adapter.py` |
-| curso-factory | `src/unified_finops.py` |
-| caramaschi | `src/scripts/ac_core/unified_finops.py` |
+| Projeto | Adapter | Estado em 30/09/2026 |
+|---|---|---|
+| papers | `src/finops/unified_adapter.py` | ativo |
+| caramaschi | `src/scripts/caramaschi_finops.py` | ativo (espelha cada chamada via `track_call`) |
+| geo-orchestrator | `src/unified_finops.py` | removido em 08/09/2026 (refatoração 5.1 do orquestrador) |
+| curso-factory | `src/unified_finops.py` | arquivo não existe mais no repositório |
 
 ---
 
